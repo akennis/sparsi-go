@@ -44,7 +44,7 @@ LibraryScanOp ──────────────────────
 - **Driver ops** (8 total in `driver_ops.go`) orchestrate the AI code generation pipeline.
 - **Operators** are structs with `dag:"input"` / `dag:"output"` field tags. They implement the dagor operator interface: `Setup`, `Reset`, `Run`.
 - **Code generation**: `daggen` reads those tags and generates `InputFields`, `OutputFields`, `SetInputField`, and `ResetFields` methods.
-- **GenerateOp** calls Gemini with structured JSON output to produce `main.go` + `ai_ops.go` for the solution binary.
+- **GenerateOp** calls Claude with structured JSON output to produce `main.go` for the solution binary. The solution DAG is built via the fluent builder API (`graph.NewBuilder`).
 - **WriteFilesOp** writes the generated files to a temp dir and runs `go mod tidy`.
 - **CodegenOp / CompileOp / RunOp** all return `nil` errors so `OutputOp` always executes.
 - **Retry loop** in `main()` retries up to 5 times, feeding the previous error back to `GenerateOp`.

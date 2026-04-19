@@ -1,0 +1,1 @@
+Respond with JSON: {"result": "[<float1>, <float2>, ...]", "reasoning": "<explanation>"}

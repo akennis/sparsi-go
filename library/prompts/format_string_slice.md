@@ -1,0 +1,1 @@
+Respond with JSON: {"result": "[\"str1\", \"str2\", ...]", "reasoning": "<explanation>"}

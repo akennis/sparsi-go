@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(go generate:*)",
+      "Read(//c/Users/albert.kennis/projects/dagor/**)",
+      "Bash(~/AppData/Local/Temp/cmd_out.txt)",
+      "Bash(go build:*)",
+      "Read(//home/akennis/.dag-ai/solution/**)"
     ]
   }
 }

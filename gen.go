@@ -7,4 +7,5 @@
 //go:generate daggen -type=RunOp -output=driver_run_gen.go
 //go:generate daggen -type=OutputOp -output=driver_output_gen.go
 //go:generate daggen -type=FallbackOp -output=driver_fallback_gen.go
+//go:generate daggen -type=ValidateDAGOp -output=driver_validate_gen.go
 package main

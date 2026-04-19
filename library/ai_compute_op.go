@@ -2,6 +2,7 @@ package library
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,10 +10,34 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/google/generative-ai-go/genai"
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/wwz16/dagor/config"
-	"google.golang.org/api/option"
 )
+
+//go:embed prompts/ai_compute_base.md
+var aiComputeBaseTemplate string
+
+//go:embed prompts/ai_compute_retry.md
+var aiComputeRetryTemplate string
+
+//go:embed prompts/format_float64.md
+var promptFormatFloat64 string
+
+//go:embed prompts/format_int.md
+var promptFormatInt string
+
+//go:embed prompts/format_string.md
+var promptFormatString string
+
+//go:embed prompts/format_float64_slice.md
+var promptFormatFloat64Slice string
+
+//go:embed prompts/format_string_slice.md
+var promptFormatStringSlice string
+
+//go:embed prompts/format_default.md
+var promptFormatDefault string
 
 // AIInputFormatter is an optional interface for In types to describe themselves in prompts.
 type AIInputFormatter interface {
@@ -32,10 +57,15 @@ type AIResponseParser interface {
 // AIComputeOp is a generic AI-powered compute operator.
 // In is the input type, Out is the output type.
 // Do not register AIComputeOp directly — use a concrete variant like AIComputeMathOperandsToFloat64Op.
+//
+// SkipIf is an optional input wire. When connected and non-empty at runtime, the AI call is
+// skipped entirely and SkipIf's value is passed through as Result. Wire a StringLookupOp's
+// Result output here to implement deterministic-first / AI-fallback conditional execution.
 type AIComputeOp[In, Out any] struct {
-	Input     *In    // single strongly-typed input
-	Result    Out    // single strongly-typed output
-	Reasoning string // always present
+	Input     *In     // single strongly-typed input
+	SkipIf    *string // optional: if non-empty, skip AI and pass through this value as Result
+	Result    Out     // single strongly-typed output
+	Reasoning string  // always present
 
 	operation  string
 	maxRetries int
@@ -56,7 +86,8 @@ func (op *AIComputeOp[In, Out]) Reset() error { return nil }
 
 func (op *AIComputeOp[In, Out]) InputFields() map[string]any {
 	return map[string]any{
-		"Input": &op.Input,
+		"Input":  &op.Input,
+		"SkipIf": &op.SkipIf,
 	}
 }
 
@@ -75,6 +106,12 @@ func (op *AIComputeOp[In, Out]) SetInputField(field string, value any) error {
 			return fmt.Errorf("field Input: expected *%T, got %T", op.Input, value)
 		}
 		op.Input = val
+	case "SkipIf":
+		val, ok := value.(*string)
+		if !ok {
+			return fmt.Errorf("field SkipIf: expected *string, got %T", value)
+		}
+		op.SkipIf = val
 	default:
 		return fmt.Errorf("field %s is not defined", field)
 	}
@@ -84,31 +121,28 @@ func (op *AIComputeOp[In, Out]) SetInputField(field string, value any) error {
 func (op *AIComputeOp[In, Out]) ResetFields() {
 	var zeroInput *In
 	op.Input = zeroInput
+	op.SkipIf = nil
 	var zeroResult Out
 	op.Result = zeroResult
 	op.Reasoning = ""
 }
 
 func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
+	// If SkipIf is non-empty, a deterministic result already exists — pass it through.
+	// This is only meaningful when Out is string; for other types the check is a no-op.
+	if op.SkipIf != nil && *op.SkipIf != "" {
+		if resultPtr, ok := any(&op.Result).(*string); ok {
+			*resultPtr = *op.SkipIf
+			op.Reasoning = "passthrough: deterministic result from lookup"
+			log.Printf("[DEBUG] AIComputeOp[%T]: SkipIf=%q — passthrough, no AI call", op.Result, *op.SkipIf)
+			return nil
+		}
+	}
+
 	log.Printf("[DEBUG] AIComputeOp[%T]: operation=%q", op.Result, op.operation)
 
-	apiKey := os.Getenv("GOOGLE_GENAI_API_KEY")
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
-	if err != nil {
-		return fmt.Errorf("genai client: %w", err)
-	}
-	defer client.Close()
-
-	model := client.GenerativeModel("gemini-flash-latest")
-	model.ResponseMIMEType = "application/json"
-	model.ResponseSchema = &genai.Schema{
-		Type: genai.TypeObject,
-		Properties: map[string]*genai.Schema{
-			"result":    {Type: genai.TypeString},
-			"reasoning": {Type: genai.TypeString},
-		},
-		Required: []string{"result", "reasoning"},
-	}
+	apiKey := os.Getenv("CLAUDE_API_KEY")
+	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
 	// Build input description.
 	var inputDesc string
@@ -129,27 +163,41 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 		formatDesc = op.builtinFormatDescription()
 	}
 
-	basePrompt := fmt.Sprintf("You are computing: %s\nInput: %s\n%s",
-		op.operation, inputDesc, formatDesc)
+	basePrompt := strings.NewReplacer(
+		"{{OPERATION}}", op.operation,
+		"{{INPUT}}", inputDesc,
+		"{{FORMAT}}", formatDesc,
+	).Replace(aiComputeBaseTemplate)
 
 	var prevResponse, prevErr string
 	for attempt := 0; attempt <= op.maxRetries; attempt++ {
 		prompt := basePrompt
 		if prevResponse != "" {
-			prompt += fmt.Sprintf("\nPrevious response: %s\nParse error: %s\nTry again.", prevResponse, prevErr)
+			prompt += "\n" + strings.NewReplacer(
+				"{{PREVIOUS_RESPONSE}}", prevResponse,
+				"{{PARSE_ERROR}}", prevErr,
+			).Replace(aiComputeRetryTemplate)
 		}
 
-		resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+		msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+			Model:     anthropic.ModelClaudeSonnet4_6,
+			MaxTokens: 1024,
+			System: []anthropic.TextBlockParam{
+				{Text: "Respond only with valid JSON. Do not include any explanation or markdown formatting."},
+			},
+			Messages: []anthropic.MessageParam{
+				anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
+			},
+		})
 		if err != nil {
 			return fmt.Errorf("generate content: %w", err)
 		}
-		if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
-			return fmt.Errorf("no candidates in response")
-		}
 
 		var raw string
-		for _, part := range resp.Candidates[0].Content.Parts {
-			raw += fmt.Sprintf("%v", part)
+		for _, block := range msg.Content {
+			if block.Type == "text" {
+				raw += block.Text
+			}
 		}
 
 		var envelope struct {
@@ -182,17 +230,17 @@ func (op *AIComputeOp[In, Out]) builtinFormatDescription() string {
 	var zeroOut Out
 	switch any(&zeroOut).(type) {
 	case *float64:
-		return `Respond with JSON: {"result": "<numeric value as string>", "reasoning": "<explanation>"}`
+		return strings.TrimSpace(promptFormatFloat64)
 	case *int:
-		return `Respond with JSON: {"result": "<integer value as string>", "reasoning": "<explanation>"}`
+		return strings.TrimSpace(promptFormatInt)
 	case *string:
-		return `Respond with JSON: {"result": "<string value>", "reasoning": "<explanation>"}`
+		return strings.TrimSpace(promptFormatString)
 	case *[]float64:
-		return `Respond with JSON: {"result": "[<float1>, <float2>, ...]", "reasoning": "<explanation>"}`
+		return strings.TrimSpace(promptFormatFloat64Slice)
 	case *[]string:
-		return `Respond with JSON: {"result": "[\"str1\", \"str2\", ...]", "reasoning": "<explanation>"}`
+		return strings.TrimSpace(promptFormatStringSlice)
 	default:
-		return `Respond with JSON: {"result": "<value>", "reasoning": "<explanation>"}`
+		return strings.TrimSpace(promptFormatDefault)
 	}
 }
 

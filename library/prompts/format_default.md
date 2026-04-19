@@ -1,0 +1,1 @@
+Respond with JSON: {"result": "<value>", "reasoning": "<explanation>"}

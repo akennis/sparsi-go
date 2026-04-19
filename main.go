@@ -12,6 +12,7 @@ import (
 
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
+	"github.com/wwz16/dagor/config"
 	"github.com/wwz16/dagor/graph"
 	"github.com/wwz16/dagor/operator"
 )
@@ -30,7 +31,7 @@ type AINodeDiag struct {
 	Reasoning string         `json:"reasoning"`
 }
 
-// buildDriverDAG constructs the driver DAG JSON.
+// buildDriverDAG constructs the driver DAG using the fluent builder API.
 //
 // Data flow:
 //
@@ -50,63 +51,64 @@ type AINodeDiag struct {
 //	                                                                             RunOp
 //	                                                                               │
 //	                                                                           OutputOp
-func buildDriverDAG(dagAIModulePath string) string {
-	modPathJSON, _ := json.Marshal(dagAIModulePath)
+func buildDriverDAG(dagAIModulePath string) (*graph.Graph, error) {
+	return graph.NewBuilder("driver_dag").
+		Vertex("prompt").Op("PromptOp").
+		Output("Prompt", "user_prompt").
 
-	return fmt.Sprintf(`{
-		"name": "driver_dag",
-		"vertices": {
-			"prompt": {
-				"op": "PromptOp",
-				"outputs": { "Prompt": "user_prompt" }
-			},
-			"libscan": {
-				"op": "LibraryScanOp",
-				"outputs": { "LibraryDescription": "lib_desc" }
-			},
-			"generate": {
-				"op": "GenerateOp",
-				"inputs": { "Prompt": "user_prompt", "LibraryDescription": "lib_desc" },
-				"outputs": { "GoFiles": "go_files" }
-			},
-			"write": {
-				"op": "WriteFilesOp",
-				"params": { "dag_ai_module_path": %s },
-				"inputs": { "GoFiles": "go_files" },
-				"outputs": { "TempDir": "temp_dir" }
-			},
-			"compile": {
-				"op": "CompileOp",
-				"on_error": "continue",
-				"inputs": { "TempDir": "temp_dir" },
-				"outputs": { "BinPath": "bin_path", "ExitCode": "compile_exit", "Stderr": "compile_stderr" }
-			},
-			"fallback": {
-				"op": "FallbackOp",
-				"params": { "dag_ai_module_path": %s },
-				"inputs": {
-					"Prompt": "user_prompt",
-					"LibraryDescription": "lib_desc",
-					"CompileExitCode": "compile_exit",
-					"CompileStderr": "compile_stderr",
-					"GoFilesOriginal": "go_files",
-					"InitialBinPath": "bin_path"
-				},
-				"outputs": { "BinPath": "final_bin_path", "Stderr": "final_compile_stderr" }
-			},
-			"run": {
-				"op": "RunOp",
-				"on_error": "continue",
-				"inputs": { "BinPath": "final_bin_path", "CompileStderr": "final_compile_stderr" },
-				"outputs": { "Stdout": "run_stdout", "Stderr": "run_stderr", "ExitCode": "run_exit" }
-			},
-			"output": {
-				"op": "OutputOp",
-				"inputs": { "RawStdout": "run_stdout", "RawStderr": "run_stderr", "ExitCode": "run_exit" },
-				"outputs": { "Result": "final_result", "AINodes": "final_ai_nodes", "ErrorMsg": "run_error" }
-			}
-		}
-	}`, modPathJSON, modPathJSON)
+		Vertex("libscan").Op("LibraryScanOp").
+		Output("LibraryDescription", "lib_desc").
+
+		Vertex("generate").Op("GenerateOp").
+		Input("Prompt", "user_prompt").
+		Input("LibraryDescription", "lib_desc").
+		Output("GoFiles", "go_files").
+
+		Vertex("write").Op("WriteFilesOp").
+		Params(map[string]string{"dag_ai_module_path": dagAIModulePath}).
+		Input("GoFiles", "go_files").
+		Output("TempDir", "temp_dir").
+
+		Vertex("validate").Op("ValidateDAGOp").
+		Input("GoFiles", "go_files").
+		Output("ValidationError", "dag_validation_error").
+
+		Vertex("compile").Op("CompileOp").
+		OnError(config.OnErrorContinue).
+		Input("TempDir", "temp_dir").
+		Output("BinPath", "bin_path").
+		Output("ExitCode", "compile_exit").
+		Output("Stderr", "compile_stderr").
+
+		Vertex("fallback").Op("FallbackOp").
+		Params(map[string]string{"dag_ai_module_path": dagAIModulePath}).
+		Input("Prompt", "user_prompt").
+		Input("LibraryDescription", "lib_desc").
+		Input("CompileExitCode", "compile_exit").
+		Input("CompileStderr", "compile_stderr").
+		Input("GoFilesOriginal", "go_files").
+		Input("InitialBinPath", "bin_path").
+		Input("ValidationError", "dag_validation_error").
+		Output("BinPath", "final_bin_path").
+		Output("Stderr", "final_compile_stderr").
+
+		Vertex("run").Op("RunOp").
+		OnError(config.OnErrorContinue).
+		Input("BinPath", "final_bin_path").
+		Input("CompileStderr", "final_compile_stderr").
+		Output("Stdout", "run_stdout").
+		Output("Stderr", "run_stderr").
+		Output("ExitCode", "run_exit").
+
+		Vertex("output").Op("OutputOp").
+		Input("RawStdout", "run_stdout").
+		Input("RawStderr", "run_stderr").
+		Input("ExitCode", "run_exit").
+		Output("Result", "final_result").
+		Output("AINodes", "final_ai_nodes").
+		Output("ErrorMsg", "run_error").
+
+		Build()
 }
 
 func printResults(result string, aiNodesRaw any) {
@@ -142,6 +144,7 @@ func registerDriverOps() {
 	operator.RegisterOp[LibraryScanOp]()
 	operator.RegisterOp[GenerateOp]()
 	operator.RegisterOp[WriteFilesOp]()
+	operator.RegisterOp[ValidateDAGOp]()
 	operator.RegisterOp[CodegenOp]()
 	operator.RegisterOp[CompileOp]()
 	operator.RegisterOp[FallbackOp]()
@@ -164,10 +167,9 @@ func main() {
 	}
 	defer pool.Release()
 
-	dagJSON := buildDriverDAG(modulePath)
-	g, err := graph.NewGraphFromJson(json.RawMessage(dagJSON))
+	g, err := buildDriverDAG(modulePath)
 	if err != nil {
-		log.Fatalf("NewGraphFromJson: %v", err)
+		log.Fatalf("buildDriverDAG: %v", err)
 	}
 	eng, err := dagor.NewEngine(g, pool)
 	if err != nil {

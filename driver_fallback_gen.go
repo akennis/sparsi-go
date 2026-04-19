@@ -7,7 +7,7 @@ import (
 
 func (op *FallbackOp) InputFields() map[string]any {
 	return map[string]any {
-		"Prompt": &op.Prompt,"LibraryDescription": &op.LibraryDescription,"CompileExitCode": &op.CompileExitCode,"CompileStderr": &op.CompileStderr,"GoFilesOriginal": &op.GoFilesOriginal,"InitialBinPath": &op.InitialBinPath,
+		"Prompt": &op.Prompt,"LibraryDescription": &op.LibraryDescription,"CompileExitCode": &op.CompileExitCode,"CompileStderr": &op.CompileStderr,"GoFilesOriginal": &op.GoFilesOriginal,"InitialBinPath": &op.InitialBinPath,"ValidationError": &op.ValidationError,
 	}
 }
 
@@ -55,6 +55,12 @@ func (op *FallbackOp) SetInputField(field string, value any) error {
 		} else {
 			return fmt.Errorf("field %s is not type of *string", field)
 		}
+	case "ValidationError":
+		if val, ok := value.(*string); ok {
+			op.ValidationError = val
+		} else {
+			return fmt.Errorf("field %s is not type of *string", field)
+		}
 	
 	default:
 		return fmt.Errorf("field %s is not defined", field)
@@ -75,6 +81,8 @@ func (op *FallbackOp) ResetFields() {
 	op.GoFilesOriginal = zeroGoFilesOriginal
 	var zeroInitialBinPath *string
 	op.InitialBinPath = zeroInitialBinPath
+	var zeroValidationError *string
+	op.ValidationError = zeroValidationError
 	
 	var zeroBinPath string
 	op.BinPath = zeroBinPath

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,10 +15,57 @@ import (
 
 	dagailib "github.com/akennis/clawdag-go/library"
 
-	"github.com/google/generative-ai-go/genai"
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/wwz16/dagor/config"
-	"google.golang.org/api/option"
 )
+
+//go:embed prompts/codegen.md
+var codegenPromptTemplate string
+
+//go:embed prompts/compile_error_context.md
+var compileErrorContextTemplate string
+
+//go:embed prompts/dag_validation_error_context.md
+var dagValidationErrorContextTemplate string
+
+// ValidateDAGOp validates the generated Go source.
+// ValidationError is empty when the generated code is structurally valid.
+type ValidateDAGOp struct {
+	GoFiles         *string `dag:"input"`
+	ValidationError string  `dag:"output"`
+}
+
+// goVersion returns the Go toolchain version suitable for use in a go.mod file (e.g. "1.24.0").
+func goVersion() string {
+	v := strings.TrimPrefix(runtime.Version(), "go")
+	return v
+}
+
+func (op *ValidateDAGOp) Setup(params *config.Params) error { return nil }
+func (op *ValidateDAGOp) Reset() error                      { return nil }
+func (op *ValidateDAGOp) Run(ctx context.Context) error {
+	// log.Printf("[DEBUG] ValidateDAGOp: validating generated DAG")
+	// var files map[string]string
+	// if err := json.Unmarshal([]byte(*op.GoFiles), &files); err != nil {
+	// 	op.ValidationError = fmt.Sprintf("parse GoFiles: %v", err)
+	// 	log.Printf("[DEBUG] ValidateDAGOp: %s", op.ValidationError)
+	// 	return nil
+	// }
+	// dagJSON := files["dag_json"]
+	// if dagJSON == "" {
+	// 	op.ValidationError = "dag_json field missing from generated files"
+	// 	log.Printf("[DEBUG] ValidateDAGOp: %s", op.ValidationError)
+	// 	return nil
+	// }
+	// if err := validateDAGJSON(dagJSON); err != nil {
+	// 	op.ValidationError = err.Error()
+	// 	log.Printf("[DEBUG] ValidateDAGOp: errors:\n%s", op.ValidationError)
+	// } else {
+	// 	log.Printf("[DEBUG] ValidateDAGOp: OK")
+	// }
+	return nil
+}
 
 // PromptOp reads a user prompt from stdin.
 type PromptOp struct {
@@ -54,143 +102,88 @@ func (op *LibraryScanOp) Run(ctx context.Context) error {
 		dagailib.DivOpDescription,
 		dagailib.PackMathOperandsOpDescription,
 		dagailib.AIComputeMathOperandsToFloat64OpDescription,
+		dagailib.StringConstOpDescription,
+		dagailib.StringLookupOpDescription,
+		dagailib.StringToLowerOpDescription,
+		dagailib.AIComputeStringToStringOpDescription,
+		dagailib.CityTimeOpDescription,
+		dagailib.ModeSelectOpDescription,
 	}, "\n")
-	log.Printf("[DEBUG] LibraryScanOp: loaded %d ops", 6)
+	log.Printf("[DEBUG] LibraryScanOp: loaded %d ops", 12)
 	return nil
 }
 
-// GenerateOp calls Gemini to generate Go source files for the solution.
+// stripMarkdownFences removes optional ```json ... ``` or ``` ... ``` wrappers
+// that the model sometimes emits despite being told to return raw JSON.
+func stripMarkdownFences(s string) string {
+	s = strings.TrimSpace(s)
+	for _, prefix := range []string{"```json", "```"} {
+		if strings.HasPrefix(s, prefix) {
+			s = strings.TrimPrefix(s, prefix)
+			s = strings.TrimSuffix(strings.TrimSpace(s), "```")
+			return strings.TrimSpace(s)
+		}
+	}
+	return s
+}
+
+// buildCodegenPrompt assembles the Gemini prompt for solution code generation.
+// compileContext is empty for the initial attempt; for retries it contains the
+// compile error and the previously generated code.
+func buildCodegenPrompt(task, libraryDescription, compileContext string) string {
+	var cc string
+	if compileContext != "" {
+		cc = compileContext + "\n"
+	}
+	return strings.NewReplacer(
+		"{{LIBRARY_DESCRIPTION}}", libraryDescription,
+		"{{TASK}}", task,
+		"{{COMPILE_CONTEXT}}", cc,
+	).Replace(codegenPromptTemplate)
+}
+
+// GenerateOp calls Claude to generate Go source for the solution.
 type GenerateOp struct {
 	Prompt             *string `dag:"input"`
 	LibraryDescription *string `dag:"input"`
-	GoFiles            string  `dag:"output"` // JSON: map[string]string
+	GoFiles            string  `dag:"output"` // raw Go source
 }
 
 func (op *GenerateOp) Setup(params *config.Params) error { return nil }
 func (op *GenerateOp) Reset() error                      { return nil }
 func (op *GenerateOp) Run(ctx context.Context) error {
-	log.Printf("[DEBUG] GenerateOp: calling Gemini")
-	apiKey := os.Getenv("GOOGLE_GENAI_API_KEY")
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
-	if err != nil {
-		return fmt.Errorf("genai client: %w", err)
-	}
-	defer client.Close()
+	log.Printf("[DEBUG] GenerateOp: calling Claude")
+	apiKey := os.Getenv("CLAUDE_API_KEY")
+	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
-	// modelsIter := client.ListModels(ctx)
-	// var models []string
-	// for {
-	// 	model, err := modelsIter.Next()
-	// 	if err == iterator.Done {
-	// 		break
-	// 	}
-	// 	if err != nil {
-	// 		return fmt.Errorf("list models: %w", err)
-	// 	}
-	// 	models = append(models, model.Name)
-	// }
-	// fmt.Println(models)
-
-	model := client.GenerativeModel("gemini-flash-latest")
-	model.ResponseMIMEType = "application/json"
-	model.ResponseSchema = &genai.Schema{
-		Type: genai.TypeObject,
-		Properties: map[string]*genai.Schema{
-			"main_go": {Type: genai.TypeString},
+	prompt := buildCodegenPrompt(*op.Prompt, *op.LibraryDescription, "")
+	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.ModelClaudeSonnet4_6,
+		MaxTokens: 8192,
+		System: []anthropic.TextBlockParam{
+			{Text: "Respond only with raw Go source code. Do not include any explanation, markdown, or JSON wrapping."},
 		},
-		Required: []string{"main_go"},
-	}
-
-	var sb strings.Builder
-	sb.WriteString("You are a Go code generator for a DAG-based computation system.\n\n")
-	sb.WriteString("FRAMEWORK: github.com/wwz16/dagor\n\n")
-	sb.WriteString("GRAPH JSON SCHEMA:\n")
-	sb.WriteString("  { \"name\": \"...\", \"vertices\": { \"<name>\": { \"op\": \"<Type>\", \"params\": {...},\n")
-	sb.WriteString("    \"inputs\": {\"<Field>\": \"<wire>\"}, \"outputs\": {\"<Field>\": \"<wire>\"} } } }\n\n")
-	sb.WriteString("REQUIRED IMPORTS — use exactly these, no others:\n")
-	sb.WriteString("  \"context\", \"encoding/json\", \"fmt\", \"log\", \"time\"\n")
-	sb.WriteString("  _ \"github.com/akennis/clawdag-go/library\"\n")
-	sb.WriteString("  \"github.com/panjf2000/ants/v2\"\n")
-	sb.WriteString("  \"github.com/wwz16/dagor\"\n")
-	sb.WriteString("  \"github.com/wwz16/dagor/graph\"\n")
-	sb.WriteString("  DO NOT import any other packages. Every import must be used.\n\n")
-	sb.WriteString("HOW TO RUN A DAGOR GRAPH — use exactly this pattern:\n")
-	sb.WriteString("  pool, _ := ants.NewPool(10); defer pool.Release()\n")
-	sb.WriteString("  g, err := graph.NewGraphFromJson(json.RawMessage(dagJSON))\n")
-	sb.WriteString("  eng, err := dagor.NewEngine(g, pool)\n")
-	sb.WriteString("  ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute); defer cancel()\n")
-	sb.WriteString("  if err := eng.Run(ctx); err != nil { log.Fatal(err) }\n")
-	sb.WriteString("  raw, ok := eng.GetOutput(\"wire_name\")  // returns (any, bool); cast result to *float64, *string, etc.\n\n")
-	sb.WriteString("CRITICAL — DO NOT iterate over g.Vertices or inspect graph internals:\n")
-	sb.WriteString("  WRONG: for _, v := range g.Vertices { ... }  // g.Vertices is a func, not a map — compile error\n")
-	sb.WriteString("  WRONG: vertex.Inputs  // map[string]string, not an interface — type mismatch error\n")
-	sb.WriteString("  RIGHT: use eng.GetOutput(\"wire_name\") for every value you need — always by wire name.\n\n")
-	sb.WriteString("WIRE NAMING: wire names are arbitrary strings you assign in \"outputs\", then reference in \"inputs\".\n")
-	sb.WriteString("  NOT \"vertex.Field\" syntax — just plain strings like \"val_a\", \"mul_result\".\n\n")
-	sb.WriteString("GO SYNTAX RULE — TRAILING COMMAS: Go requires a trailing comma after the LAST element\n")
-	sb.WriteString("  of every multi-line composite literal (map, slice, struct). Forgetting this is a compile error.\n")
-	sb.WriteString("  WRONG:                             RIGHT:\n")
-	sb.WriteString("    map[string]any{                    map[string]any{\n")
-	sb.WriteString("      \"a\": 1,                           \"a\": 1,\n")
-	sb.WriteString("      \"b\": 2   // ← missing comma       \"b\": 2,  // ← required\n")
-	sb.WriteString("    }                                  }\n\n")
-	sb.WriteString("STDOUT: result JSON MUST go to stdout via fmt.Println — NOT log.Printf (that goes to stderr).\n\n")
-	sb.WriteString("AVAILABLE OPS (blank-import _ \"github.com/akennis/clawdag-go/library\" registers ALL of them — this import is REQUIRED):\n")
-	sb.WriteString(*op.LibraryDescription)
-	sb.WriteString("\n\n")
-	sb.WriteString("KEY RULE: you may ONLY use ops listed above. There is NO MulOp, MultiplyOp, or any other op.\n")
-	sb.WriteString("  For any operation not covered by the library (e.g. multiplication, power, modulo),\n")
-	sb.WriteString("  use PackMathOperandsOp + AIComputeMathOperandsToFloat64Op.\n\n")
-	sb.WriteString("EXAMPLE — solving 2 * 3 + 4 using AI for multiply and AddOp for add:\n")
-	sb.WriteString("  Vertices:\n")
-	sb.WriteString("    \"c2\":   {\"op\":\"ConstOp\", \"params\":{\"Value\":\"2\"}, \"outputs\":{\"Result\":\"v2\"}},\n")
-	sb.WriteString("    \"c3\":   {\"op\":\"ConstOp\", \"params\":{\"Value\":\"3\"}, \"outputs\":{\"Result\":\"v3\"}},\n")
-	sb.WriteString("    \"c4\":   {\"op\":\"ConstOp\", \"params\":{\"Value\":\"4\"}, \"outputs\":{\"Result\":\"v4\"}},\n")
-	sb.WriteString("    \"pack\": {\"op\":\"PackMathOperandsOp\",\n")
-	sb.WriteString("              \"inputs\":{\"A\":\"v2\",\"B\":\"v3\"}, \"outputs\":{\"Result\":\"operands\"}},\n")
-	sb.WriteString("    \"mul\":  {\"op\":\"AIComputeMathOperandsToFloat64Op\", \"params\":{\"operation\":\"multiply A by B\", \"max_retries\":\"3\"},\n")
-	sb.WriteString("              \"inputs\":{\"Input\":\"operands\"}, \"outputs\":{\"Result\":\"mul_res\",\"Reasoning\":\"mul_why\"}},\n")
-	sb.WriteString("    \"add\":  {\"op\":\"AddOp\", \"inputs\":{\"A\":\"mul_res\",\"B\":\"v4\"}, \"outputs\":{\"Result\":\"final\"}}\n")
-	sb.WriteString("  Read result:    raw, _ := eng.GetOutput(\"final\"); val := *(raw.(*float64))\n")
-	sb.WriteString("  Read reasoning: rRaw, _ := eng.GetOutput(\"mul_why\"); reasoning := *(rRaw.(*string))\n")
-	sb.WriteString("  Read AI result: arRaw, _ := eng.GetOutput(\"mul_res\"); aiResult := *(arRaw.(*float64))\n\n")
-	sb.WriteString("TASK: ")
-	sb.WriteString(*op.Prompt)
-	sb.WriteString("\n\n")
-	sb.WriteString("OUTPUT REQUIREMENTS — generate main_go: a complete compilable package main that:\n")
-	sb.WriteString("  * uses ONLY the required imports listed above (no extra packages)\n")
-	sb.WriteString("  * blank-imports _ \"github.com/akennis/clawdag-go/library\" (REQUIRED — never omit this)\n")
-	sb.WriteString("  * does NOT import \"github.com/wwz16/dagor/operator\" (not needed — library registers ops)\n")
-	sb.WriteString("  * adds a trailing comma after the last element of EVERY multi-line composite literal\n")
-	sb.WriteString("  * uses the exact dagor engine pattern above\n")
-	sb.WriteString("  * prints to stdout: {\"result\":\"<answer as string>\",\"ai_nodes\":[{\"op\":\"AIComputeMathOperandsToFloat64Op\",\"inputs\":{...},\"output\":<num>,\"reasoning\":\"...\"}]}\n")
-	sb.WriteString("  * result MUST be a JSON string (use fmt.Sprintf(\"%g\", val) to convert float64 to string)\n")
-	sb.WriteString("  * ai_nodes contains one entry per AIComputeMathOperandsToFloat64Op vertex, with 'output' from its Result wire and 'reasoning' from its Reasoning wire\n")
-	sb.WriteString("  * ai_nodes is [] if no AI op was used\n")
-	sb.WriteString("  * calls log.Fatal on any error\n")
-
-	resp, err := model.GenerateContent(ctx, genai.Text(sb.String()))
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("generate content: %w", err)
 	}
-	if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
-		return fmt.Errorf("no candidates in response")
-	}
 
 	var raw string
-	for _, part := range resp.Candidates[0].Content.Parts {
-		raw += fmt.Sprintf("%v", part)
+	for _, block := range msg.Content {
+		if block.Type == "text" {
+			raw += block.Text
+		}
 	}
+	raw = strings.TrimSpace(stripMarkdownFences(raw))
 
-	var files map[string]string
-	if err := json.Unmarshal([]byte(raw), &files); err != nil {
-		return fmt.Errorf("parse generated JSON: %w\nraw: %s", err, raw)
-	}
-	if files["main_go"] == "" {
-		return fmt.Errorf("generated JSON missing main_go\nraw: %s", raw)
+	if !strings.HasPrefix(raw, "package ") {
+		return fmt.Errorf("generated output does not look like Go source\nraw: %s", raw)
 	}
 	op.GoFiles = raw
-	log.Printf("[DEBUG] GenerateOp: received main_go (%d bytes)", len(files["main_go"]))
+	log.Printf("[DEBUG] GenerateOp: received main_go (%d bytes)", len(raw))
 	return nil
 }
 
@@ -208,11 +201,7 @@ func (op *WriteFilesOp) Setup(params *config.Params) error {
 }
 func (op *WriteFilesOp) Reset() error { return nil }
 func (op *WriteFilesOp) Run(ctx context.Context) error {
-	log.Printf("[DEBUG] WriteFilesOp: parsing generated files JSON")
-	var files map[string]string
-	if err := json.Unmarshal([]byte(*op.GoFiles), &files); err != nil {
-		return fmt.Errorf("parse GoFiles: %w", err)
-	}
+	mainGo := strings.TrimSpace(*op.GoFiles)
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -231,15 +220,16 @@ func (op *WriteFilesOp) Run(ctx context.Context) error {
 
 	// Write go.mod (not from AI)
 	modPath := filepath.ToSlash(op.dagAIModulePath)
-	goMod := fmt.Sprintf("module solution\n\ngo 1.24\n\nrequire github.com/akennis/clawdag-go v0.0.0\n\nreplace github.com/akennis/clawdag-go => %s\n", modPath)
-	log.Printf("[DEBUG] WriteFilesOp: writing go.mod (replace github.com/akennis/clawdag-go => %s)", modPath)
+	dagorPath := filepath.ToSlash(filepath.Join(filepath.Dir(op.dagAIModulePath), "dagor"))
+	goMod := fmt.Sprintf("module solution\n\ngo %s\n\nrequire github.com/akennis/clawdag-go v0.0.0\n\nreplace github.com/akennis/clawdag-go => %s\nreplace github.com/wwz16/dagor => %s\n", goVersion(), modPath, dagorPath)
+	log.Printf("[DEBUG] WriteFilesOp: writing go.mod (replace github.com/akennis/clawdag-go => %s, github.com/wwz16/dagor => %s)", modPath, dagorPath)
 	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0644); err != nil {
 		return fmt.Errorf("write go.mod: %w", err)
 	}
 
 	// Write main.go from AI
-	log.Printf("[DEBUG] WriteFilesOp: writing main.go (%d bytes)", len(files["main_go"]))
-	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(files["main_go"]), 0644); err != nil {
+	log.Printf("[DEBUG] WriteFilesOp: writing main.go (%d bytes)", len(mainGo))
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(mainGo), 0644); err != nil {
 		return fmt.Errorf("write main.go: %w", err)
 	}
 
@@ -442,6 +432,7 @@ type FallbackOp struct {
 	CompileStderr      *string `dag:"input"` // from initial CompileOp
 	GoFilesOriginal    *string `dag:"input"` // from initial GenerateOp
 	InitialBinPath     *string `dag:"input"` // from initial CompileOp
+	ValidationError    *string `dag:"input"` // from ValidateDAGOp
 	BinPath            string  `dag:"output"`
 	Stderr             string  `dag:"output"` // forwarded to RunOp as CompileStderr
 
@@ -454,131 +445,66 @@ func (op *FallbackOp) Setup(params *config.Params) error {
 }
 func (op *FallbackOp) Reset() error { return nil }
 func (op *FallbackOp) Run(ctx context.Context) error {
-	if *op.CompileExitCode == 0 {
+	compileOK := *op.CompileExitCode == 0
+	validationOK := op.ValidationError == nil || *op.ValidationError == ""
+
+	if compileOK && validationOK {
 		op.BinPath = *op.InitialBinPath
-		log.Printf("[DEBUG] FallbackOp: initial compile succeeded, passthrough bin=%s", op.BinPath)
+		log.Printf("[DEBUG] FallbackOp: compile succeeded and DAG valid, passthrough bin=%s", op.BinPath)
 		return nil
 	}
-	log.Printf("[DEBUG] FallbackOp: initial compile failed, generating fallback code")
 
-	// Extract the original generated code to include in the retry prompt.
-	var origFiles map[string]string
-	_ = json.Unmarshal([]byte(*op.GoFilesOriginal), &origFiles)
-	originalCode := origFiles["main_go"]
+	originalCode := strings.TrimSpace(*op.GoFilesOriginal)
 
-	// Call Gemini with the same base prompt as GenerateOp, plus error context.
-	apiKey := os.Getenv("GOOGLE_GENAI_API_KEY")
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
-	if err != nil {
-		return fmt.Errorf("genai client: %w", err)
+	// Use validation error context when the DAG is structurally invalid;
+	// compile error context otherwise. Fixing DAG structure typically resolves
+	// compile errors that stem from it, so we don't send both at once.
+	var errorContext string
+	if !validationOK {
+		log.Printf("[DEBUG] FallbackOp: DAG validation failed, generating fallback code")
+		errorContext = strings.NewReplacer(
+			"{{VALIDATION_ERROR}}", *op.ValidationError,
+			"{{GENERATED_CODE}}", originalCode,
+		).Replace(dagValidationErrorContextTemplate)
+	} else {
+		log.Printf("[DEBUG] FallbackOp: initial compile failed, generating fallback code")
+		errorContext = strings.NewReplacer(
+			"{{COMPILE_ERROR}}", *op.CompileStderr,
+			"{{GENERATED_CODE}}", originalCode,
+		).Replace(compileErrorContextTemplate)
 	}
-	defer client.Close()
 
-	model := client.GenerativeModel("gemini-flash-latest")
-	model.ResponseMIMEType = "application/json"
-	model.ResponseSchema = &genai.Schema{
-		Type: genai.TypeObject,
-		Properties: map[string]*genai.Schema{
-			"main_go": {Type: genai.TypeString},
+	// Call Claude with the same base prompt as GenerateOp, plus error context.
+	apiKey := os.Getenv("CLAUDE_API_KEY")
+	client := anthropic.NewClient(option.WithAPIKey(apiKey))
+
+	prompt := buildCodegenPrompt(*op.Prompt, *op.LibraryDescription, errorContext)
+	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.ModelClaudeSonnet4_6,
+		MaxTokens: 8192,
+		System: []anthropic.TextBlockParam{
+			{Text: "Respond only with raw Go source code. Do not include any explanation, markdown, or JSON wrapping."},
 		},
-		Required: []string{"main_go"},
-	}
-
-	var sb strings.Builder
-	sb.WriteString("You are a Go code generator for a DAG-based computation system.\n\n")
-	sb.WriteString("FRAMEWORK: github.com/wwz16/dagor\n\n")
-	sb.WriteString("GRAPH JSON SCHEMA:\n")
-	sb.WriteString("  { \"name\": \"...\", \"vertices\": { \"<name>\": { \"op\": \"<Type>\", \"params\": {...},\n")
-	sb.WriteString("    \"inputs\": {\"<Field>\": \"<wire>\"}, \"outputs\": {\"<Field>\": \"<wire>\"} } } }\n\n")
-	sb.WriteString("REQUIRED IMPORTS — use exactly these, no others:\n")
-	sb.WriteString("  \"context\", \"encoding/json\", \"fmt\", \"log\", \"time\"\n")
-	sb.WriteString("  _ \"github.com/akennis/clawdag-go/library\"\n")
-	sb.WriteString("  \"github.com/panjf2000/ants/v2\"\n")
-	sb.WriteString("  \"github.com/wwz16/dagor\"\n")
-	sb.WriteString("  \"github.com/wwz16/dagor/graph\"\n")
-	sb.WriteString("  DO NOT import any other packages. Every import must be used.\n\n")
-	sb.WriteString("HOW TO RUN A DAGOR GRAPH — use exactly this pattern:\n")
-	sb.WriteString("  pool, _ := ants.NewPool(10); defer pool.Release()\n")
-	sb.WriteString("  g, err := graph.NewGraphFromJson(json.RawMessage(dagJSON))\n")
-	sb.WriteString("  eng, err := dagor.NewEngine(g, pool)\n")
-	sb.WriteString("  ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute); defer cancel()\n")
-	sb.WriteString("  if err := eng.Run(ctx); err != nil { log.Fatal(err) }\n")
-	sb.WriteString("  raw, ok := eng.GetOutput(\"wire_name\")  // returns (any, bool); cast result to *float64, *string, etc.\n\n")
-	sb.WriteString("CRITICAL — DO NOT iterate over g.Vertices or inspect graph internals:\n")
-	sb.WriteString("  WRONG: for _, v := range g.Vertices { ... }  // g.Vertices is a func, not a map — compile error\n")
-	sb.WriteString("  WRONG: vertex.Inputs  // map[string]string, not an interface — type mismatch error\n")
-	sb.WriteString("  RIGHT: use eng.GetOutput(\"wire_name\") for every value you need — always by wire name.\n\n")
-	sb.WriteString("WIRE NAMING: wire names are arbitrary strings you assign in \"outputs\", then reference in \"inputs\".\n")
-	sb.WriteString("  NOT \"vertex.Field\" syntax — just plain strings like \"val_a\", \"mul_result\".\n\n")
-	sb.WriteString("GO SYNTAX RULE — TRAILING COMMAS: Go requires a trailing comma after the LAST element\n")
-	sb.WriteString("  of every multi-line composite literal (map, slice, struct). Forgetting this is a compile error.\n")
-	sb.WriteString("  WRONG:                             RIGHT:\n")
-	sb.WriteString("    map[string]any{                    map[string]any{\n")
-	sb.WriteString("      \"a\": 1,                           \"a\": 1,\n")
-	sb.WriteString("      \"b\": 2   // ← missing comma       \"b\": 2,  // ← required\n")
-	sb.WriteString("    }                                  }\n\n")
-	sb.WriteString("STDOUT: result JSON MUST go to stdout via fmt.Println — NOT log.Printf (that goes to stderr).\n\n")
-	sb.WriteString("AVAILABLE OPS (blank-import _ \"github.com/akennis/clawdag-go/library\" registers ALL of them — this import is REQUIRED):\n")
-	sb.WriteString(*op.LibraryDescription)
-	sb.WriteString("\n\n")
-	sb.WriteString("KEY RULE: you may ONLY use ops listed above. There is NO MulOp, MultiplyOp, or any other op.\n")
-	sb.WriteString("  For any operation not covered by the library (e.g. multiplication, power, modulo),\n")
-	sb.WriteString("  use PackMathOperandsOp + AIComputeMathOperandsToFloat64Op.\n\n")
-	sb.WriteString("EXAMPLE — solving 2 * 3 + 4 using AI for multiply and AddOp for add:\n")
-	sb.WriteString("  Vertices:\n")
-	sb.WriteString("    \"c2\":   {\"op\":\"ConstOp\", \"params\":{\"Value\":\"2\"}, \"outputs\":{\"Result\":\"v2\"}},\n")
-	sb.WriteString("    \"c3\":   {\"op\":\"ConstOp\", \"params\":{\"Value\":\"3\"}, \"outputs\":{\"Result\":\"v3\"}},\n")
-	sb.WriteString("    \"c4\":   {\"op\":\"ConstOp\", \"params\":{\"Value\":\"4\"}, \"outputs\":{\"Result\":\"v4\"}},\n")
-	sb.WriteString("    \"pack\": {\"op\":\"PackMathOperandsOp\",\n")
-	sb.WriteString("              \"inputs\":{\"A\":\"v2\",\"B\":\"v3\"}, \"outputs\":{\"Result\":\"operands\"}},\n")
-	sb.WriteString("    \"mul\":  {\"op\":\"AIComputeMathOperandsToFloat64Op\", \"params\":{\"operation\":\"multiply A by B\", \"max_retries\":\"3\"},\n")
-	sb.WriteString("              \"inputs\":{\"Input\":\"operands\"}, \"outputs\":{\"Result\":\"mul_res\",\"Reasoning\":\"mul_why\"}},\n")
-	sb.WriteString("    \"add\":  {\"op\":\"AddOp\", \"inputs\":{\"A\":\"mul_res\",\"B\":\"v4\"}, \"outputs\":{\"Result\":\"final\"}}\n")
-	sb.WriteString("  Read result:    raw, _ := eng.GetOutput(\"final\"); val := *(raw.(*float64))\n")
-	sb.WriteString("  Read reasoning: rRaw, _ := eng.GetOutput(\"mul_why\"); reasoning := *(rRaw.(*string))\n")
-	sb.WriteString("  Read AI result: arRaw, _ := eng.GetOutput(\"mul_res\"); aiResult := *(arRaw.(*float64))\n\n")
-	sb.WriteString("TASK: ")
-	sb.WriteString(*op.Prompt)
-	sb.WriteString("\n\n")
-	sb.WriteString("PREVIOUS ATTEMPT FAILED TO COMPILE.\n\n")
-	sb.WriteString("Compile error:\n")
-	sb.WriteString(*op.CompileStderr)
-	sb.WriteString("\n\nPreviously generated code:\n```go\n")
-	sb.WriteString(originalCode)
-	sb.WriteString("\n```\n\nFix ALL errors above before responding.\n\n")
-	sb.WriteString("OUTPUT REQUIREMENTS — generate main_go: a complete compilable package main that:\n")
-	sb.WriteString("  * uses ONLY the required imports listed above (no extra packages)\n")
-	sb.WriteString("  * blank-imports _ \"github.com/akennis/clawdag-go/library\" (REQUIRED — never omit this)\n")
-	sb.WriteString("  * does NOT import \"github.com/wwz16/dagor/operator\" (not needed — library registers ops)\n")
-	sb.WriteString("  * adds a trailing comma after the last element of EVERY multi-line composite literal\n")
-	sb.WriteString("  * uses the exact dagor engine pattern above\n")
-	sb.WriteString("  * prints to stdout: {\"result\":\"<answer as string>\",\"ai_nodes\":[{\"op\":\"AIComputeMathOperandsToFloat64Op\",\"inputs\":{...},\"output\":<num>,\"reasoning\":\"...\"}]}\n")
-	sb.WriteString("  * result MUST be a JSON string (use fmt.Sprintf(\"%g\", val) to convert float64 to string)\n")
-	sb.WriteString("  * ai_nodes contains one entry per AIComputeMathOperandsToFloat64Op vertex, with 'output' from its Result wire and 'reasoning' from its Reasoning wire\n")
-	sb.WriteString("  * ai_nodes is [] if no AI op was used\n")
-	sb.WriteString("  * calls log.Fatal on any error\n")
-
-	resp, err := model.GenerateContent(ctx, genai.Text(sb.String()))
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("fallback generate content: %w", err)
 	}
-	if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
-		return fmt.Errorf("fallback: no candidates in response")
-	}
 
 	var raw string
-	for _, part := range resp.Candidates[0].Content.Parts {
-		raw += fmt.Sprintf("%v", part)
+	for _, block := range msg.Content {
+		if block.Type == "text" {
+			raw += block.Text
+		}
 	}
+	raw = strings.TrimSpace(stripMarkdownFences(raw))
 
-	var files map[string]string
-	if err := json.Unmarshal([]byte(raw), &files); err != nil {
-		return fmt.Errorf("fallback: parse generated JSON: %w\nraw: %s", err, raw)
+	if !strings.HasPrefix(raw, "package ") {
+		return fmt.Errorf("fallback: output does not look like Go source\nraw: %s", raw)
 	}
-	if files["main_go"] == "" {
-		return fmt.Errorf("fallback: generated JSON missing main_go\nraw: %s", raw)
-	}
-	log.Printf("[DEBUG] FallbackOp: received fallback main_go (%d bytes)", len(files["main_go"]))
+	log.Printf("[DEBUG] FallbackOp: received fallback main_go (%d bytes)", len(raw))
 
 	// Write fallback files to a separate directory so the initial solution is not clobbered.
 	home, err := os.UserHomeDir()
@@ -594,11 +520,12 @@ func (op *FallbackOp) Run(ctx context.Context) error {
 	}
 
 	modPath := filepath.ToSlash(op.dagAIModulePath)
-	goMod := fmt.Sprintf("module solution\n\ngo 1.24\n\nrequire github.com/akennis/clawdag-go v0.0.0\n\nreplace github.com/akennis/clawdag-go => %s\n", modPath)
+	dagorPath := filepath.ToSlash(filepath.Join(filepath.Dir(op.dagAIModulePath), "dagor"))
+	goMod := fmt.Sprintf("module solution\n\ngo %s\n\nrequire github.com/akennis/clawdag-go v0.0.0\n\nreplace github.com/akennis/clawdag-go => %s\nreplace github.com/wwz16/dagor => %s\n", goVersion(), modPath, dagorPath)
 	if err := os.WriteFile(filepath.Join(fallbackDir, "go.mod"), []byte(goMod), 0644); err != nil {
 		return fmt.Errorf("write fallback go.mod: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(fallbackDir, "main.go"), []byte(files["main_go"]), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(fallbackDir, "main.go"), []byte(raw), 0644); err != nil {
 		return fmt.Errorf("write fallback main.go: %w", err)
 	}
 
