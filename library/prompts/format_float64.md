@@ -1,1 +1,1 @@
-Respond with JSON: {"result": "<numeric value as string>", "reasoning": "<explanation>"}
+Respond with the numeric result as a plain decimal number only. No explanation. Example: 42.5

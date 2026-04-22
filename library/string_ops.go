@@ -18,12 +18,10 @@ const StringLookupOpDescription = `StringLookupOp: looks up Key in a hardcoded s
   Input:  Key *string.
   Output: Result string (empty string if key not found).`
 
-const AIComputeStringToStringOpDescription = `AIComputeStringToStringOp: AI-powered string→string computation with optional deterministic passthrough.
+const AIComputeStringToStringOpDescription = `AIComputeStringToStringOp: AI-powered string→string computation.
   Params:   operation string — plain-English description (e.g. "suggest a condiment that pairs with the given food").
             max_retries string — parse retries (default "3").
   Inputs:   Input *string — the query string.
-            SkipIf *string — optional; connect to a StringLookupOp Result wire.
-                             If non-empty at runtime, the AI call is skipped and SkipIf is used as Result directly.
   Outputs:  Result string, Reasoning string.`
 
 // StringConstOp injects a constant string value into the graph.
@@ -90,7 +88,7 @@ func (op *StringToLowerOp) Run(_ context.Context) error {
 }
 
 // AIComputeStringToStringOp is the registered concrete variant of AIComputeOp
-// for string→string operations with optional deterministic passthrough via SkipIf.
+// for string→string operations.
 type AIComputeStringToStringOp struct {
 	AIComputeOp[string, string]
 }

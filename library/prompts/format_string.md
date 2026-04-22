@@ -1,1 +1,1 @@
-Respond with JSON: {"result": "<string value>", "reasoning": "<explanation>"}
+Respond with the result string only. No quotes, no punctuation, no explanation.

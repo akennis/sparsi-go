@@ -57,15 +57,10 @@ type AIResponseParser interface {
 // AIComputeOp is a generic AI-powered compute operator.
 // In is the input type, Out is the output type.
 // Do not register AIComputeOp directly — use a concrete variant like AIComputeMathOperandsToFloat64Op.
-//
-// SkipIf is an optional input wire. When connected and non-empty at runtime, the AI call is
-// skipped entirely and SkipIf's value is passed through as Result. Wire a StringLookupOp's
-// Result output here to implement deterministic-first / AI-fallback conditional execution.
 type AIComputeOp[In, Out any] struct {
-	Input     *In     // single strongly-typed input
-	SkipIf    *string // optional: if non-empty, skip AI and pass through this value as Result
-	Result    Out     // single strongly-typed output
-	Reasoning string  // always present
+	Input     *In    // single strongly-typed input
+	Result    Out    // single strongly-typed output
+	Reasoning string // always present
 
 	operation  string
 	maxRetries int
@@ -86,8 +81,7 @@ func (op *AIComputeOp[In, Out]) Reset() error { return nil }
 
 func (op *AIComputeOp[In, Out]) InputFields() map[string]any {
 	return map[string]any{
-		"Input":  &op.Input,
-		"SkipIf": &op.SkipIf,
+		"Input": &op.Input,
 	}
 }
 
@@ -106,12 +100,6 @@ func (op *AIComputeOp[In, Out]) SetInputField(field string, value any) error {
 			return fmt.Errorf("field Input: expected *%T, got %T", op.Input, value)
 		}
 		op.Input = val
-	case "SkipIf":
-		val, ok := value.(*string)
-		if !ok {
-			return fmt.Errorf("field SkipIf: expected *string, got %T", value)
-		}
-		op.SkipIf = val
 	default:
 		return fmt.Errorf("field %s is not defined", field)
 	}
@@ -121,24 +109,12 @@ func (op *AIComputeOp[In, Out]) SetInputField(field string, value any) error {
 func (op *AIComputeOp[In, Out]) ResetFields() {
 	var zeroInput *In
 	op.Input = zeroInput
-	op.SkipIf = nil
 	var zeroResult Out
 	op.Result = zeroResult
 	op.Reasoning = ""
 }
 
 func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
-	// If SkipIf is non-empty, a deterministic result already exists — pass it through.
-	// This is only meaningful when Out is string; for other types the check is a no-op.
-	if op.SkipIf != nil && *op.SkipIf != "" {
-		if resultPtr, ok := any(&op.Result).(*string); ok {
-			*resultPtr = *op.SkipIf
-			op.Reasoning = "passthrough: deterministic result from lookup"
-			log.Printf("[DEBUG] AIComputeOp[%T]: SkipIf=%q — passthrough, no AI call", op.Result, *op.SkipIf)
-			return nil
-		}
-	}
-
 	log.Printf("[DEBUG] AIComputeOp[%T]: operation=%q", op.Result, op.operation)
 
 	apiKey := os.Getenv("CLAUDE_API_KEY")
@@ -183,7 +159,7 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 			Model:     anthropic.ModelClaudeSonnet4_6,
 			MaxTokens: 1024,
 			System: []anthropic.TextBlockParam{
-				{Text: "Respond only with valid JSON. Do not include any explanation or markdown formatting."},
+				{Text: "Respond only with the requested format. Do not include any explanation or markdown formatting."},
 			},
 			Messages: []anthropic.MessageParam{
 				anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
@@ -200,26 +176,14 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 			}
 		}
 
-		var envelope struct {
-			Result    string `json:"result"`
-			Reasoning string `json:"reasoning"`
-		}
-		if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
-			prevResponse = raw
-			prevErr = err.Error()
-			log.Printf("[DEBUG] AIComputeOp: attempt %d envelope parse failed: %v", attempt+1, err)
-			continue
-		}
-
-		if parseErr := op.parseResult(envelope.Result); parseErr != nil {
+		if parseErr := op.parseResult(strings.TrimSpace(raw)); parseErr != nil {
 			prevResponse = raw
 			prevErr = parseErr.Error()
 			log.Printf("[DEBUG] AIComputeOp: attempt %d result parse failed: %v", attempt+1, parseErr)
 			continue
 		}
 
-		op.Reasoning = envelope.Reasoning
-		log.Printf("[DEBUG] AIComputeOp: result=%v reasoning=%q", op.Result, op.Reasoning)
+		log.Printf("[DEBUG] AIComputeOp: result=%v", op.Result)
 		return nil
 	}
 

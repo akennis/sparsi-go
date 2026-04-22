@@ -1,1 +1,1 @@
-Respond with JSON: {"result": "[\"str1\", \"str2\", ...]", "reasoning": "<explanation>"}
+Respond with a JSON array of strings only. No explanation. Example: ["Asia/Tokyo", "Asia/Seoul"]
