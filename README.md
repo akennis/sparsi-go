@@ -19,27 +19,51 @@ Workflows are DAGs built from operators (ops). Each op is a Go struct with `dag:
 
 ### The driver DAG
 
-The top-level program is itself a DAG. It accepts a natural-language task prompt and generates, compiles, and runs a Go solution binary:
+The top-level program runs a **three-phase pipeline**, each phase as a separate DAG.
+
+#### Phase 1: Design
 
 ```
-PromptOp ──────────────────────────────────────────────────────────────────┐
-                                                                            ▼
-LibraryScanOp ─────────────────────────────────────────────────► GenerateOp
-                                                                            │
-                                                                    WriteFilesOp
-                                                                            │
-                                                               ValidateDAGOp│
-                                                                            │
-                                                          CompileOp (on_error: continue)
-                                                                            │
-                                                          FallbackOp ◄──────┘
-                                                          (no-op if compile OK;
-                                                           re-generates + recompiles on failure;
-                                                           hard error if both fail)
-                                                                            │
-                                                                          RunOp
-                                                                            │
-                                                                        OutputOp
+PromptOp ──────────────┐
+                        ▼
+LibraryScanOp ────► DAGDesignOp → design
+```
+
+`DAGDesignOp` is an AI op that produces a natural-language design for the solution DAG given the user's prompt and the available library.
+
+#### Phase 2: Review loop (up to 3 rounds, interactive)
+
+The user reviews the design. If feedback is given, a refine DAG runs:
+
+```
+StringConstOp (prompt) ──────────────────┐
+StringConstOp (library) ─────────────────┤
+StringConstOp (prev design) ─────────────┼─► DAGDesignRefineOp → design
+StringConstOp (feedback) ────────────────┘
+```
+
+This repeats until the user approves or 3 rounds are exhausted.
+
+#### Phase 3: Codegen
+
+```
+StringConstOp (prompt) ──────┐
+StringConstOp (library) ─────┤
+StringConstOp (design) ───────┴──► GenerateOp → go_files
+                                        │
+                          ┌─────────────┴─────────────┐
+                          ▼                             ▼
+                   ValidateDAGOp                  WriteFilesOp → temp_dir
+                          │                             │
+                          └──────────────┐              ▼
+                                         └──► CompileOp (on_error: continue)
+                                                        │
+                                         ┌──────────────┴──────────────┐
+                                         ▼                              ▼
+                                    FallbackOp ──────────────────► RunOp (on_error: continue)
+                                    (no-op if compile OK;               │
+                                     re-generates + recompiles          ▼
+                                     on failure)                    OutputOp
 ```
 
 `GenerateOp` and `FallbackOp` call Claude (claude-sonnet-4-6) to produce a `main.go` that wires together library ops into a solution DAG. The solution binary outputs structured JSON:

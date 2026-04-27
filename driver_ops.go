@@ -29,6 +29,20 @@ var compileErrorContextTemplate string
 //go:embed prompts/dag_validation_error_context.md
 var dagValidationErrorContextTemplate string
 
+//go:embed prompts/dag_design.md
+var dagDesignPromptTemplate string
+
+//go:embed prompts/dag_design_refine.md
+var dagDesignRefinePromptTemplate string
+
+// AINodeDiag contains diagnostics for a single AI-powered node.
+type AINodeDiag struct {
+	Op        string         `json:"op"`
+	Inputs    map[string]any `json:"inputs"`
+	Output    any            `json:"output"`
+	Reasoning string         `json:"reasoning"`
+}
+
 // ValidateDAGOp validates the generated Go source.
 // ValidationError is empty when the generated code is structurally valid.
 type ValidateDAGOp struct {
@@ -117,7 +131,7 @@ func (op *LibraryScanOp) Run(ctx context.Context) error {
 // that the model sometimes emits despite being told to return raw JSON.
 func stripMarkdownFences(s string) string {
 	s = strings.TrimSpace(s)
-	for _, prefix := range []string{"```json", "```"} {
+	for _, prefix := range []string{"```json", "```go", "```"} {
 		if strings.HasPrefix(s, prefix) {
 			s = strings.TrimPrefix(s, prefix)
 			s = strings.TrimSuffix(strings.TrimSpace(s), "```")
@@ -127,10 +141,10 @@ func stripMarkdownFences(s string) string {
 	return s
 }
 
-// buildCodegenPrompt assembles the Gemini prompt for solution code generation.
+// buildCodegenPrompt assembles the Claude prompt for solution code generation.
 // compileContext is empty for the initial attempt; for retries it contains the
 // compile error and the previously generated code.
-func buildCodegenPrompt(task, libraryDescription, compileContext string) string {
+func buildCodegenPrompt(task, libraryDescription, approvedDesign, compileContext string) string {
 	var cc string
 	if compileContext != "" {
 		cc = compileContext + "\n"
@@ -138,14 +152,106 @@ func buildCodegenPrompt(task, libraryDescription, compileContext string) string 
 	return strings.NewReplacer(
 		"{{LIBRARY_DESCRIPTION}}", libraryDescription,
 		"{{TASK}}", task,
+		"{{APPROVED_DESIGN}}", approvedDesign,
 		"{{COMPILE_CONTEXT}}", cc,
 	).Replace(codegenPromptTemplate)
+}
+
+// DAGDesignOp calls Claude to produce a human-readable DAG design (no code).
+type DAGDesignOp struct {
+	Prompt             *string `dag:"input"`
+	LibraryDescription *string `dag:"input"`
+	Design             string  `dag:"output"`
+}
+
+func (op *DAGDesignOp) Setup(params *config.Params) error { return nil }
+func (op *DAGDesignOp) Reset() error                      { return nil }
+func (op *DAGDesignOp) Run(ctx context.Context) error {
+	log.Printf("[DEBUG] DAGDesignOp: calling Claude for design")
+	apiKey := os.Getenv("CLAUDE_API_KEY")
+	client := anthropic.NewClient(option.WithAPIKey(apiKey))
+
+	prompt := strings.NewReplacer(
+		"{{LIBRARY_DESCRIPTION}}", *op.LibraryDescription,
+		"{{TASK}}", *op.Prompt,
+	).Replace(dagDesignPromptTemplate)
+
+	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.ModelClaudeSonnet4_6,
+		MaxTokens: 4096,
+		System: []anthropic.TextBlockParam{
+			{Text: "Respond only with a structured DAG design document. No Go code."},
+		},
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("DAGDesignOp: %w", err)
+	}
+
+	for _, block := range msg.Content {
+		if block.Type == "text" {
+			op.Design += block.Text
+		}
+	}
+	op.Design = strings.TrimSpace(op.Design)
+	log.Printf("[DEBUG] DAGDesignOp: received design (%d bytes)", len(op.Design))
+	return nil
+}
+
+// DAGDesignRefineOp calls Claude to refine an existing DAG design based on feedback.
+type DAGDesignRefineOp struct {
+	Prompt             *string `dag:"input"`
+	LibraryDescription *string `dag:"input"`
+	PreviousDesign     *string `dag:"input"`
+	Feedback           *string `dag:"input"`
+	Design             string  `dag:"output"`
+}
+
+func (op *DAGDesignRefineOp) Setup(params *config.Params) error { return nil }
+func (op *DAGDesignRefineOp) Reset() error                      { return nil }
+func (op *DAGDesignRefineOp) Run(ctx context.Context) error {
+	log.Printf("[DEBUG] DAGDesignRefineOp: calling Claude for refinement")
+	apiKey := os.Getenv("CLAUDE_API_KEY")
+	client := anthropic.NewClient(option.WithAPIKey(apiKey))
+
+	prompt := strings.NewReplacer(
+		"{{LIBRARY_DESCRIPTION}}", *op.LibraryDescription,
+		"{{TASK}}", *op.Prompt,
+		"{{PREVIOUS_DESIGN}}", *op.PreviousDesign,
+		"{{FEEDBACK}}", *op.Feedback,
+	).Replace(dagDesignRefinePromptTemplate)
+
+	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.ModelClaudeSonnet4_6,
+		MaxTokens: 4096,
+		System: []anthropic.TextBlockParam{
+			{Text: "Respond only with a structured DAG design document. No Go code."},
+		},
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("DAGDesignRefineOp: %w", err)
+	}
+
+	for _, block := range msg.Content {
+		if block.Type == "text" {
+			op.Design += block.Text
+		}
+	}
+	op.Design = strings.TrimSpace(op.Design)
+	log.Printf("[DEBUG] DAGDesignRefineOp: received refined design (%d bytes)", len(op.Design))
+	return nil
 }
 
 // GenerateOp calls Claude to generate Go source for the solution.
 type GenerateOp struct {
 	Prompt             *string `dag:"input"`
 	LibraryDescription *string `dag:"input"`
+	ApprovedDesign     *string `dag:"input"`
 	GoFiles            string  `dag:"output"` // raw Go source
 }
 
@@ -156,18 +262,26 @@ func (op *GenerateOp) Run(ctx context.Context) error {
 	apiKey := os.Getenv("CLAUDE_API_KEY")
 	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
-	prompt := buildCodegenPrompt(*op.Prompt, *op.LibraryDescription, "")
-	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+	approvedDesign := ""
+	if op.ApprovedDesign != nil {
+		approvedDesign = *op.ApprovedDesign
+	}
+	prompt := buildCodegenPrompt(*op.Prompt, *op.LibraryDescription, approvedDesign, "")
+	stream := client.Messages.NewStreaming(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.ModelClaudeSonnet4_6,
-		MaxTokens: 8192,
+		MaxTokens: 32000,
 		System: []anthropic.TextBlockParam{
-			{Text: "Respond only with raw Go source code. Do not include any explanation, markdown, or JSON wrapping."},
+			{Text: "Respond with Go source code wrapped in a single ```go ... ``` code fence. No explanation, no other text."},
 		},
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
 		},
 	})
-	if err != nil {
+	msg := anthropic.Message{}
+	for stream.Next() {
+		msg.Accumulate(stream.Current())
+	}
+	if err := stream.Err(); err != nil {
 		return fmt.Errorf("generate content: %w", err)
 	}
 
@@ -428,6 +542,7 @@ func (op *OutputOp) Run(ctx context.Context) error {
 type FallbackOp struct {
 	Prompt             *string `dag:"input"`
 	LibraryDescription *string `dag:"input"`
+	ApprovedDesign     *string `dag:"input"`
 	CompileExitCode    *int    `dag:"input"` // from initial CompileOp
 	CompileStderr      *string `dag:"input"` // from initial CompileOp
 	GoFilesOriginal    *string `dag:"input"` // from initial GenerateOp
@@ -478,18 +593,26 @@ func (op *FallbackOp) Run(ctx context.Context) error {
 	apiKey := os.Getenv("CLAUDE_API_KEY")
 	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
-	prompt := buildCodegenPrompt(*op.Prompt, *op.LibraryDescription, errorContext)
-	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+	approvedDesign := ""
+	if op.ApprovedDesign != nil {
+		approvedDesign = *op.ApprovedDesign
+	}
+	prompt := buildCodegenPrompt(*op.Prompt, *op.LibraryDescription, approvedDesign, errorContext)
+	stream := client.Messages.NewStreaming(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.ModelClaudeSonnet4_6,
-		MaxTokens: 8192,
+		MaxTokens: 32000,
 		System: []anthropic.TextBlockParam{
-			{Text: "Respond only with raw Go source code. Do not include any explanation, markdown, or JSON wrapping."},
+			{Text: "Respond with Go source code wrapped in a single ```go ... ``` code fence. No explanation, no other text."},
 		},
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
 		},
 	})
-	if err != nil {
+	msg := anthropic.Message{}
+	for stream.Next() {
+		msg.Accumulate(stream.Current())
+	}
+	if err := stream.Err(); err != nil {
 		return fmt.Errorf("fallback generate content: %w", err)
 	}
 

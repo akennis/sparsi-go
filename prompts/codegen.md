@@ -58,16 +58,175 @@ Never ask the AI to "explain", "describe", or "answer" — always ask it to prod
 Define the exact expected format using ExpectedFormat() when a struct output type is needed.
 
 # INSTRUCTIONS
-1. Scan the library of available clawdag operations
-2. Plan a workflow DAG that receives the user's input and computes the desired result. For each node in the plan, work through this decision in strict order — do NOT skip ahead to AI:
-   a) Does an existing library op do this? Use it.
-   b) Can a deterministic Go function compute this — including with a hardcoded dataset (map, slice, switch)? Write a new op. There is no size limit on inline data: a 300-line map of city→timezone is correct and expected. Complexity is not a reason to use AI.
-   c) Only if (a) and (b) are both impossible: use a registered AICompute op or define a new AIComputeOp variant (see CUSTOM AI COMPUTE OPS below).
-   Strict priority: existing library → new deterministic op (with data if needed) → AI.
+1. Review the approved DAG design below — it specifies the vertices, ops, and connections.
+2. For each vertex: use the named library op if available; write a new deterministic op if the design calls for one; use the specified AI op where the design designates one.
 3. Generate Go code for the entire program including embedded DAG built via the fluent builder DSL.
 
-# HANDLING USER INPUT:
-The generated workflow executable will be used many times over different inputs.  Prompt the user for workflow input (possibly more than one value depending on the specific workflow solution).  When prompting for input tell the user what they must provide and the expected format (if any).  Ensure that user input is handled robustly so that their entire input is captured.  Feed user inputs into the DAG by placing those values into const operations prior to DAG compilation and execution.
+# HANDLING USER INPUT
+
+The generated workflow executable supports two runtime modes selected by a `--mode` flag:
+- `--mode cli` (default): interactive CLI — prompts the user on stdin
+- `--mode mcp`: MCP server — exposes the workflow as a callable tool for AI clients (e.g. Claude)
+
+## Step 1 — Define UserInput
+
+Define a `UserInput` struct capturing every parameter the workflow needs. Fields depend on the task:
+
+```go
+type UserInput struct {
+    Query string  // example — use task-appropriate field names and types
+}
+```
+
+## Step 2 — Implement readCLIInput()
+
+Isolate ALL stdin prompting into a single function that returns `(UserInput, error)`. Tell the user
+what to provide and the expected format. Capture the full input robustly:
+
+```go
+func readCLIInput() (UserInput, error) {
+    reader := bufio.NewReader(os.Stdin)
+    fmt.Print("Enter query: ")
+    line, _ := reader.ReadString('\n')
+    q := strings.TrimSpace(line)
+    if q == "" {
+        return UserInput{}, fmt.Errorf("no input provided")
+    }
+    return UserInput{Query: q}, nil
+}
+```
+
+## Step 3 — Parameterise buildGraph via UserInput
+
+`buildGraph` must accept `input UserInput`, not individual string arguments. Place field values
+into StringConstOp params before DAG compilation:
+
+```go
+func buildGraph(input UserInput) (*graph.Graph, error) {
+    return graph.NewBuilder("workflow").
+        Vertex("user_input").Op("StringConstOp").
+        Params(map[string]string{"Value": input.Query}).
+        Output("Result", "raw_input").
+        // ... rest of graph ...
+        Build()
+}
+```
+
+## Step 4 — Shared runWorkflow()
+
+Extract the DAG build+run+read sequence into a single shared function. Both modes call this;
+neither duplicates the engine logic:
+
+```go
+func runWorkflow(ctx context.Context, pool *ants.Pool, input UserInput) (string, error) {
+    g, err := buildGraph(input)
+    if err != nil {
+        return "", fmt.Errorf("build: %w", err)
+    }
+    eng, err := dagor.NewEngine(g, pool)
+    if err != nil {
+        return "", fmt.Errorf("engine: %w", err)
+    }
+    if err := eng.Run(ctx); err != nil {
+        return "", fmt.Errorf("run: %w", err)
+    }
+    raw, ok := eng.GetOutput("final_result")
+    if !ok {
+        return "", fmt.Errorf("no result")
+    }
+    return *(raw.(*string)), nil
+}
+```
+
+## Step 5 — Implement runCLIProgram()
+
+Reads user input and delegates entirely to `runWorkflow`:
+
+```go
+func runCLIProgram(ctx context.Context, pool *ants.Pool) error {
+    input, err := readCLIInput()
+    if err != nil {
+        return err
+    }
+    result, err := runWorkflow(ctx, pool, input)
+    if err != nil {
+        return err
+    }
+    fmt.Println()
+    fmt.Println(result)
+    return nil
+}
+```
+
+## Step 6 — Implement runMCPServer()
+
+Registers the workflow as a single MCP tool. Populates `UserInput` from tool call arguments and
+delegates to the same `runWorkflow`. Use `github.com/mark3labs/mcp-go/mcp` and
+`github.com/mark3labs/mcp-go/server`.
+
+IMPORTANT: `server.ServeStdio` is long-lived — it handles multiple tool calls over the process
+lifetime. Do NOT pass a short-lived context to `runMCPServer`; use `context.Background()` for the
+server itself. Each individual tool call gets its own per-call timeout derived from the handler's
+`ctx` argument (which is already scoped to the individual request by the mcp-go library).
+
+```go
+func runMCPServer(pool *ants.Pool) error {
+    s := server.NewMCPServer("workflow-name", "1.0.0")
+    tool := mcp.NewTool("run_workflow",
+        mcp.WithDescription("Short description of what this workflow does."),
+        mcp.WithString("query",
+            mcp.Required(),
+            mcp.Description("The user query."),
+        ),
+        // one mcp.With* declaration per UserInput field
+    )
+    s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+        // Per-call timeout — NOT a process-level timeout.
+        callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+        defer cancel()
+        args := req.Params.Arguments.(map[string]interface{})
+        input := UserInput{
+            Query: args["query"].(string),
+        }
+        result, err := runWorkflow(callCtx, pool, input)
+        if err != nil {
+            return mcp.NewToolResultError(err.Error()), nil
+        }
+        return mcp.NewToolResultText(result), nil
+    })
+    return server.ServeStdio(s)
+}
+```
+
+## Step 7 — Wire up main() with --mode flag
+
+In CLI mode a single process-level timeout is appropriate. In MCP mode the process is long-lived
+so no process-level timeout is used — the per-call timeout inside the tool handler is sufficient.
+
+```go
+func main() {
+    mode := flag.String("mode", "cli", "runtime mode: cli or mcp")
+    flag.Parse()
+
+    registerPredicates() // omit if no predicates
+    pool, _ := ants.NewPool(10)
+    defer pool.Release()
+
+    switch *mode {
+    case "mcp":
+        // Long-lived process: no process-level timeout. Per-call timeout is in the handler.
+        if err := runMCPServer(pool); err != nil {
+            log.Fatal(err)
+        }
+    default: // "cli"
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+        defer cancel()
+        if err := runCLIProgram(ctx, pool); err != nil {
+            log.Fatal(err)
+        }
+    }
+}
+```
 
 # Dagor LLM Hints
 
@@ -171,6 +330,38 @@ func buildGraph(sourceVal int) (*graph.Graph, error) {
 - **Input/Output Mapping**: `Input("op_field", "global_name")` and `Output("op_field", "global_name")` map operator fields to global names in the graph's scope.
 - **CoalesceOp**: A built-in operator (`CoalesceIntOp`, `CoalesceStringOp`, etc.) that picks the first non-nil input from its branches.
 
+# config.Params API — CRITICAL: ALL GETTERS TAKE (path, defaultValue) AND RETURN ONE VALUE
+  `config.Params` is passed to `Setup(p *config.Params)`. Every getter returns a single value with
+  the supplied default when the key is absent. There is NO two-return-value form.
+
+  SIGNATURES:
+    p.GetString(path, defaultValue string) string
+    p.GetInt(path string, defaultValue int) int
+    p.GetInt64(path string, defaultValue int64) int64
+    p.GetFloat64(path string, defaultValue float64) float64
+    p.GetBool(path string, defaultValue bool) bool
+    p.Exists(path string) bool                    // use when you need to distinguish "absent" from ""
+    p.GetArrayString(path string) []string
+    p.GetArrayInt64(path string) []int64
+    p.GetArrayFloat64(path string) []float64
+
+  CORRECT PATTERNS:
+    // optional string — check empty string as sentinel:
+    if v := p.GetString("key", ""); v != "" { op.field = v }
+
+    // string with a meaningful default:
+    op.field = p.GetString("key", "default_value")
+
+    // int param (from Params(map[string]int{"key": 5})):
+    op.count = p.GetInt("key", 0)
+
+    // check existence before reading:
+    if p.Exists("key") { op.flag = true }
+
+  WRONG — compile errors:
+    if v, ok := p.GetString("key"); ok { ... }    // WRONG: returns 1 value; missing defaultValue arg
+    v, ok := p.GetString("key", "")               // WRONG: GetString returns 1 value, not 2
+
 # NECCESSARY IMPORTS — use these as required:
   _ "github.com/akennis/clawdag-go/library"    // pre-programmed operations and pre-formed AI nodes
                                                // NOTE: replace the blank _ with a named import when you
@@ -183,6 +374,9 @@ func buildGraph(sourceVal int) (*graph.Graph, error) {
   "github.com/wwz16/dagor/config"              // config.MergeCoalesce — REQUIRED whenever .Merge() is called
   "github.com/wwz16/dagor/graph"               // graph.NewBuilder
   "github.com/wwz16/dagor/predicate"           // only when registering condition predicates
+  "flag"                                        // REQUIRED — always present for --mode flag parsing
+  "github.com/mark3labs/mcp-go/mcp"            // MCP tool definition — REQUIRED for --mode mcp
+  "github.com/mark3labs/mcp-go/server"         // MCP stdio server — REQUIRED for --mode mcp
 
 # HOW TO RUN A DAGOR GRAPH — use exactly this pattern:
   pool, _ := ants.NewPool(10); defer pool.Release()
@@ -250,6 +444,101 @@ func buildGraph(sourceVal int) (*graph.Graph, error) {
 
 # AVAILABLE OPS (blank-import _ "github.com/akennis/clawdag-go/library" registers ALL of them — this import is REQUIRED):
 {{LIBRARY_DESCRIPTION}}
+
+# MAP NODES — fan out a sub-graph over a slice, collect results into []any:
+  Use a map vertex when a workflow must apply the same pipeline to each element of a
+  runtime-produced slice. Map vertices have NO Op() — they are the fan-out mechanism.
+
+  BUILDER PATTERN:
+    Vertex("map_vertex_name").
+    Input("Items", "input_slice_wire").       // single slice input
+    MapOver("item").                           // item wire name inside the sub-graph
+        SubVertex("step1").
+            Op("ProcessOp").
+            Input("In", "item").              // item injected as *T pointer
+            Output("Out", "intermediate").
+        SubVertex("step2").
+            Op("TransformOp").
+            Input("In", "intermediate").
+            Output("Result", "result").
+        CollectInto("result", "output_wire"). // terminates sub-graph; returns to parent chain
+
+  RULES:
+  * Map vertex MUST NOT have Op() set — it replaces the operator.
+  * Exactly ONE Input() on the map vertex (the slice).
+  * MapOver() argument is the item wire name — available inside the sub-graph only.
+  * Each element is injected as a *T pointer; sub-graph operators must type-assert in SetInputField:
+      func (op *MyOp) SetInputField(field string, value any) error {
+          if field == "In" {
+              v, ok := value.(*string)  // use the concrete element type
+              if !ok { return fmt.Errorf("expected *string, got %T", value) }
+              op.In = v
+          }
+          return nil
+      }
+  * CollectInto(resultWire, outputWire): resultWire is the sub-graph wire collected per element;
+    outputWire is the parent-graph wire written with the assembled []any result.
+  * All N sub-graph executions run concurrently in the shared goroutine pool.
+  * Output is always []any. Read and type-assert downstream:
+      raw, ok := eng.GetOutput("output_wire")
+      results := raw.([]any)
+      for _, v := range results {
+          item := v.(string)  // use the concrete element type
+      }
+  * No new imports required for map nodes — no blank import needed.
+
+  NESTED MAP NODES (2 levels deep):
+  A SubgraphVertexBuilder (vertex inside a map sub-graph) may itself be a map node by calling
+  .MapOver() on it instead of .Op(). This fans out the inner sub-graph over a slice that the
+  outer sub-graph produces. Maximum nesting depth is 2 — NestedSubgraphVertexBuilder has no
+  MapOver method and a third level will not compile.
+
+  NESTED BUILDER PATTERN:
+    Vertex("outer_map").
+    Input("Items", "outer_slice").
+    MapOver("outer_item").
+        SubVertex("produce_inner").
+            Op("SomeOp").
+            Input("In", "outer_item").
+            Output("Out", "inner_slice").
+        SubVertex("inner_map").          // SubgraphVertexBuilder — no Op() call
+        Input("Items", "inner_slice").
+        MapOver("inner_item").           // returns SubgraphMapConfigBuilder
+            SubVertex("process").        // returns NestedSubgraphVertexBuilder
+            Op("ProcessOp").
+            Input("In", "inner_item").
+            Output("Result", "result").
+            CollectInto("result", "inner_results"). // returns SubgraphVertexBuilder
+        SubVertex("aggregate").          // back in outer sub-graph level
+        Op("AggregateOp").
+        Input("In", "inner_results").
+        Output("Result", "outer_result").
+        CollectInto("outer_result", "all_results").
+
+  NESTED MAP RULES:
+  * The inner map SubVertex must NOT have Op() set — MapOver() replaces the operator.
+  * CollectInto on the inner SubgraphMapConfigBuilder returns a SubgraphVertexBuilder, so the
+    outer sub-graph can continue with more SubVertex calls after the inner map.
+  * Inner items are injected as *T pointers, same as outer map items — type-assert accordingly.
+  * Wire names are scoped per level: outer sub-graph wires and inner sub-graph wires are independent.
+  * ALL N inner sub-graph executions run concurrently within the outer element's goroutine.
+  * Inner CollectInto produces []any, same as outer CollectInto.
+
+  EXAMPLE — apply StringToUpperOp to each string in a slice:
+    Vertex("upper_all").
+    Input("Items", "raw_strings").
+    MapOver("item").
+        SubVertex("to_upper").
+            Op("StringToUpperOp").
+            Input("Value", "item").
+            Output("Result", "result").
+        CollectInto("result", "upper_strings").
+
+    // reading the output:
+    raw, _ := eng.GetOutput("upper_strings")
+    for _, v := range raw.([]any) {
+        fmt.Println(v.(string))
+    }
 
 # KEY RULES:
   * For tasks with a partial hardcoded answer + AI fallback, use the CONDITIONAL PATTERN below.
@@ -521,6 +810,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -531,6 +821,8 @@ import (
 
 	clawdag "github.com/akennis/clawdag-go/library"
 	_ "github.com/wwz16/dagor/operator/builtin"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/config"
@@ -538,6 +830,26 @@ import (
 	"github.com/wwz16/dagor/operator"
 	"github.com/wwz16/dagor/predicate"
 )
+
+// ── 0. User input ─────────────────────────────────────────────────────────────
+// All workflow parameters live in one struct. readCLIInput populates it from
+// stdin; runMCPServer populates it from tool call arguments.
+
+type UserInput struct {
+	Query string
+}
+
+func readCLIInput() (UserInput, error) {
+	fmt.Println("Ask about: current time | current weather | US national debt")
+	fmt.Print("Your query: ")
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	q := strings.TrimSpace(line)
+	if q == "" {
+		return UserInput{}, fmt.Errorf("no query provided")
+	}
+	return UserInput{Query: q}, nil
+}
 
 // ── 1. Struct output type for AI intent classification ────────────────────────
 // AI's ONLY job: parse natural language → one of four enum values.
@@ -655,11 +967,11 @@ func registerPredicates() {
 //                                                    │
 //                                              "final_result"
 
-func buildGraph(userQuery string) (*graph.Graph, error) {
+func buildGraph(input UserInput) (*graph.Graph, error) {
 	return graph.NewBuilder("query_router").
 		Vertex("user_input").
 		Op("StringConstOp").
-		Params(map[string]string{"Value": userQuery}).
+		Params(map[string]string{"Value": input.Query}).
 		Output("Result", "raw_query").
 
 		// AI op: classify intent — returns IntentFields struct
@@ -721,35 +1033,74 @@ func buildGraph(userQuery string) (*graph.Graph, error) {
 		Build()
 }
 
+// ── 6. Shared execution — both modes call this ────────────────────────────────
+
+func runWorkflow(ctx context.Context, pool *ants.Pool, input UserInput) (string, error) {
+	g, err := buildGraph(input)
+	if err != nil { return "", fmt.Errorf("build: %w", err) }
+	eng, err := dagor.NewEngine(g, pool)
+	if err != nil { return "", fmt.Errorf("engine: %w", err) }
+	if err := eng.Run(ctx); err != nil { return "", fmt.Errorf("run: %w", err) }
+	raw, ok := eng.GetOutput("final_result")
+	if !ok { return "", fmt.Errorf("no result") }
+	return *(raw.(*string)), nil
+}
+
+// ── 7. CLI mode ────────────────────────────────────────────────────────────────
+
+func runCLIProgram(ctx context.Context, pool *ants.Pool) error {
+	input, err := readCLIInput()
+	if err != nil { return err }
+	result, err := runWorkflow(ctx, pool, input)
+	if err != nil { return err }
+	fmt.Println()
+	fmt.Println(result)
+	return nil
+}
+
+// ── 8. MCP mode ────────────────────────────────────────────────────────────────
+// Long-lived process: ServeStdio blocks until the client disconnects.
+// No process-level timeout — each tool call gets its own per-call timeout.
+
+func runMCPServer(pool *ants.Pool) error {
+	s := server.NewMCPServer("query-router", "1.0.0")
+	tool := mcp.NewTool("run_query",
+		mcp.WithDescription("Answer questions about current time, weather, or US national debt."),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("The natural-language question to answer."),
+		),
+	)
+	s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		args := req.Params.Arguments.(map[string]interface{})
+		input := UserInput{Query: args["query"].(string)}
+		result, err := runWorkflow(callCtx, pool, input)
+		if err != nil { return mcp.NewToolResultError(err.Error()), nil }
+		return mcp.NewToolResultText(result), nil
+	})
+	return server.ServeStdio(s)
+}
+
+// ── 9. Entry point ─────────────────────────────────────────────────────────────
+
 func main() {
+	mode := flag.String("mode", "cli", "runtime mode: cli or mcp")
+	flag.Parse()
+
 	registerPredicates()
-
-	fmt.Println("Ask about: current time | current weather | US national debt")
-	fmt.Print("Your query: ")
-	reader := bufio.NewReader(os.Stdin)
-	userQuery, _ := reader.ReadString('\n')
-	userQuery = strings.TrimSpace(userQuery)
-	if userQuery == "" { log.Fatal("No query provided.") }
-
-	g, err := buildGraph(userQuery)
-	if err != nil { log.Fatalf("build: %v", err) }
-
 	pool, _ := ants.NewPool(10)
 	defer pool.Release()
 
-	eng, err := dagor.NewEngine(g, pool)
-	if err != nil { log.Fatalf("engine: %v", err) }
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	if err := eng.Run(ctx); err != nil { log.Fatalf("run: %v", err) }
-
-	raw, ok := eng.GetOutput("final_result")
-	if !ok { log.Fatal("no result") }
-	result := raw.(*string)
-	fmt.Println()
-	fmt.Println(*result)
+	switch *mode {
+	case "mcp":
+		if err := runMCPServer(pool); err != nil { log.Fatal(err) }
+	default: // "cli"
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := runCLIProgram(ctx, pool); err != nil { log.Fatal(err) }
+	}
 }
 ```
 
@@ -760,6 +1111,14 @@ func main() {
 - `ConditionInput("intent_str")` on every branch vertex: the predicate sees the wire; the op does not.
 - `CoalesceNStringOp` (n = branch count) with `Merge(config.MergeCoalesce)` collapses all branches to one wire.
 - Read exactly one output wire via `eng.GetOutput("final_result")`.
+- `UserInput` struct holds all parameters; `readCLIInput` populates it from stdin, MCP handler from tool args.
+- `runWorkflow(ctx, pool, input)` is the single shared DAG execution path — both modes call it identically.
+- `runCLIProgram` and `runMCPServer` are thin wrappers that only differ in how they obtain `UserInput` and present output.
+- `--mode` flag (default `cli`) selects between `runCLIProgram` and `runMCPServer` in `main()`.
+
+# APPROVED DAG DESIGN
+The following DAG design has been reviewed and approved by the operator. Implement it exactly.
+{{APPROVED_DESIGN}}
 
 # TASK: {{TASK}}
 

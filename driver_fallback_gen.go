@@ -7,7 +7,7 @@ import (
 
 func (op *FallbackOp) InputFields() map[string]any {
 	return map[string]any {
-		"Prompt": &op.Prompt,"LibraryDescription": &op.LibraryDescription,"CompileExitCode": &op.CompileExitCode,"CompileStderr": &op.CompileStderr,"GoFilesOriginal": &op.GoFilesOriginal,"InitialBinPath": &op.InitialBinPath,"ValidationError": &op.ValidationError,
+		"Prompt": &op.Prompt,"LibraryDescription": &op.LibraryDescription,"ApprovedDesign": &op.ApprovedDesign,"CompileExitCode": &op.CompileExitCode,"CompileStderr": &op.CompileStderr,"GoFilesOriginal": &op.GoFilesOriginal,"InitialBinPath": &op.InitialBinPath,"ValidationError": &op.ValidationError,
 	}
 }
 
@@ -28,6 +28,12 @@ func (op *FallbackOp) SetInputField(field string, value any) error {
 	case "LibraryDescription":
 		if val, ok := value.(*string); ok {
 			op.LibraryDescription = val
+		} else {
+			return fmt.Errorf("field %s is not type of *string", field)
+		}
+	case "ApprovedDesign":
+		if val, ok := value.(*string); ok {
+			op.ApprovedDesign = val
 		} else {
 			return fmt.Errorf("field %s is not type of *string", field)
 		}
@@ -73,6 +79,8 @@ func (op *FallbackOp) ResetFields() {
 	op.Prompt = zeroPrompt
 	var zeroLibraryDescription *string
 	op.LibraryDescription = zeroLibraryDescription
+	var zeroApprovedDesign *string
+	op.ApprovedDesign = zeroApprovedDesign
 	var zeroCompileExitCode *int
 	op.CompileExitCode = zeroCompileExitCode
 	var zeroCompileStderr *string

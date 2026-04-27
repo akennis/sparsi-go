@@ -6,7 +6,8 @@
       "Read(//c/Users/albert.kennis/projects/dagor/**)",
       "Bash(~/AppData/Local/Temp/cmd_out.txt)",
       "Bash(go build:*)",
-      "Read(//home/akennis/.dag-ai/solution/**)"
+      "Read(//home/akennis/.dag-ai/solution/**)",
+      "Skill(claude-api)"
     ]
   }
 }

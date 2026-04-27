@@ -157,7 +157,7 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 
 		msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeSonnet4_6,
-			MaxTokens: 1024,
+			MaxTokens: 16 * 1024,
 			System: []anthropic.TextBlockParam{
 				{Text: "Respond only with the requested format. Do not include any explanation or markdown formatting."},
 			},

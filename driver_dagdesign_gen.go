@@ -5,19 +5,19 @@ import (
 	"fmt"
 )
 
-func (op *GenerateOp) InputFields() map[string]any {
+func (op *DAGDesignOp) InputFields() map[string]any {
 	return map[string]any {
-		"Prompt": &op.Prompt,"LibraryDescription": &op.LibraryDescription,"ApprovedDesign": &op.ApprovedDesign,
+		"Prompt": &op.Prompt,"LibraryDescription": &op.LibraryDescription,
 	}
 }
 
-func (op *GenerateOp) OutputFields() map[string]any {
+func (op *DAGDesignOp) OutputFields() map[string]any {
 	return map[string]any {
-		"GoFiles": &op.GoFiles,
+		"Design": &op.Design,
 	}
 }
 
-func (op *GenerateOp) SetInputField(field string, value any) error {
+func (op *DAGDesignOp) SetInputField(field string, value any) error {
 	switch field {
 	case "Prompt":
 		if val, ok := value.(*string); ok {
@@ -31,12 +31,6 @@ func (op *GenerateOp) SetInputField(field string, value any) error {
 		} else {
 			return fmt.Errorf("field %s is not type of *string", field)
 		}
-	case "ApprovedDesign":
-		if val, ok := value.(*string); ok {
-			op.ApprovedDesign = val
-		} else {
-			return fmt.Errorf("field %s is not type of *string", field)
-		}
 	
 	default:
 		return fmt.Errorf("field %s is not defined", field)
@@ -44,15 +38,13 @@ func (op *GenerateOp) SetInputField(field string, value any) error {
 	return nil
 }
 
-func (op *GenerateOp) ResetFields() {
+func (op *DAGDesignOp) ResetFields() {
 	var zeroPrompt *string
 	op.Prompt = zeroPrompt
 	var zeroLibraryDescription *string
 	op.LibraryDescription = zeroLibraryDescription
-	var zeroApprovedDesign *string
-	op.ApprovedDesign = zeroApprovedDesign
 	
-	var zeroGoFiles string
-	op.GoFiles = zeroGoFiles
+	var zeroDesign string
+	op.Design = zeroDesign
 	
 }

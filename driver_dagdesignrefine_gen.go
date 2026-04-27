@@ -5,19 +5,19 @@ import (
 	"fmt"
 )
 
-func (op *GenerateOp) InputFields() map[string]any {
+func (op *DAGDesignRefineOp) InputFields() map[string]any {
 	return map[string]any {
-		"Prompt": &op.Prompt,"LibraryDescription": &op.LibraryDescription,"ApprovedDesign": &op.ApprovedDesign,
+		"Prompt": &op.Prompt,"LibraryDescription": &op.LibraryDescription,"PreviousDesign": &op.PreviousDesign,"Feedback": &op.Feedback,
 	}
 }
 
-func (op *GenerateOp) OutputFields() map[string]any {
+func (op *DAGDesignRefineOp) OutputFields() map[string]any {
 	return map[string]any {
-		"GoFiles": &op.GoFiles,
+		"Design": &op.Design,
 	}
 }
 
-func (op *GenerateOp) SetInputField(field string, value any) error {
+func (op *DAGDesignRefineOp) SetInputField(field string, value any) error {
 	switch field {
 	case "Prompt":
 		if val, ok := value.(*string); ok {
@@ -31,9 +31,15 @@ func (op *GenerateOp) SetInputField(field string, value any) error {
 		} else {
 			return fmt.Errorf("field %s is not type of *string", field)
 		}
-	case "ApprovedDesign":
+	case "PreviousDesign":
 		if val, ok := value.(*string); ok {
-			op.ApprovedDesign = val
+			op.PreviousDesign = val
+		} else {
+			return fmt.Errorf("field %s is not type of *string", field)
+		}
+	case "Feedback":
+		if val, ok := value.(*string); ok {
+			op.Feedback = val
 		} else {
 			return fmt.Errorf("field %s is not type of *string", field)
 		}
@@ -44,15 +50,17 @@ func (op *GenerateOp) SetInputField(field string, value any) error {
 	return nil
 }
 
-func (op *GenerateOp) ResetFields() {
+func (op *DAGDesignRefineOp) ResetFields() {
 	var zeroPrompt *string
 	op.Prompt = zeroPrompt
 	var zeroLibraryDescription *string
 	op.LibraryDescription = zeroLibraryDescription
-	var zeroApprovedDesign *string
-	op.ApprovedDesign = zeroApprovedDesign
+	var zeroPreviousDesign *string
+	op.PreviousDesign = zeroPreviousDesign
+	var zeroFeedback *string
+	op.Feedback = zeroFeedback
 	
-	var zeroGoFiles string
-	op.GoFiles = zeroGoFiles
+	var zeroDesign string
+	op.Design = zeroDesign
 	
 }

@@ -1,8 +1,8 @@
 package main
 
 import (
+	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -17,51 +17,71 @@ import (
 	"github.com/wwz16/dagor/operator"
 )
 
-// SolutionOutput is the JSON structure written to stdout by the solution binary.
-type SolutionOutput struct {
-	Result  string       `json:"result"`
-	AINodes []AINodeDiag `json:"ai_nodes"`
-}
-
-// AINodeDiag contains diagnostics for a single AI-powered node.
-type AINodeDiag struct {
-	Op        string         `json:"op"`
-	Inputs    map[string]any `json:"inputs"`
-	Output    any            `json:"output"`
-	Reasoning string         `json:"reasoning"`
-}
-
-// buildDriverDAG constructs the driver DAG using the fluent builder API.
-//
-// Data flow:
-//
-//	PromptOp ─────────────────────────────────────────────────────────────────────┐
-//	                                                                               ▼
-//	LibraryScanOp ──────────────────────────────────────────────────────► GenerateOp
-//	                                                                               │
-//	                                                                       WriteFilesOp
-//	                                                                               │
-//	                                                             CompileOp (on_error: continue)
-//	                                                                               │
-//	                                                             FallbackOp ◄──────┘
-//	                                                             (no-op if compile OK;
-//	                                                              else re-generates + recompiles;
-//	                                                              hard DAG error if both fail)
-//	                                                                               │
-//	                                                                             RunOp
-//	                                                                               │
-//	                                                                           OutputOp
-func buildDriverDAG(dagAIModulePath string) (*graph.Graph, error) {
-	return graph.NewBuilder("driver_dag").
+// buildDesignDAG constructs the Phase 1 DAG: PromptOp + LibraryScanOp + DAGDesignOp.
+func buildDesignDAG() (*graph.Graph, error) {
+	return graph.NewBuilder("design_dag").
 		Vertex("prompt").Op("PromptOp").
-		Output("Prompt", "user_prompt").
+		Output("Prompt", "prompt_out").
 
 		Vertex("libscan").Op("LibraryScanOp").
-		Output("LibraryDescription", "lib_desc").
+		Output("LibraryDescription", "library_out").
+
+		Vertex("design").Op("DAGDesignOp").
+		Input("Prompt", "prompt_out").
+		Input("LibraryDescription", "library_out").
+		Output("Design", "design_out").
+
+		Build()
+}
+
+// buildRefineDAG constructs the refinement DAG using StringConstOp for the four known values.
+func buildRefineDAG(prompt, library, prevDesign, feedback string) (*graph.Graph, error) {
+	return graph.NewBuilder("refine_dag").
+		Vertex("prompt_const").Op("StringConstOp").
+		Params(map[string]string{"Value": prompt}).
+		Output("Result", "prompt_const_out").
+
+		Vertex("library_const").Op("StringConstOp").
+		Params(map[string]string{"Value": library}).
+		Output("Result", "library_const_out").
+
+		Vertex("prev_design_const").Op("StringConstOp").
+		Params(map[string]string{"Value": prevDesign}).
+		Output("Result", "prev_design_const_out").
+
+		Vertex("feedback_const").Op("StringConstOp").
+		Params(map[string]string{"Value": feedback}).
+		Output("Result", "feedback_const_out").
+
+		Vertex("refine").Op("DAGDesignRefineOp").
+		Input("Prompt", "prompt_const_out").
+		Input("LibraryDescription", "library_const_out").
+		Input("PreviousDesign", "prev_design_const_out").
+		Input("Feedback", "feedback_const_out").
+		Output("Design", "design_out").
+
+		Build()
+}
+
+// buildCodegenDAG constructs the Phase 3 DAG using StringConstOp for the three known values.
+func buildCodegenDAG(prompt, library, approvedDesign, dagAIModulePath string) (*graph.Graph, error) {
+	return graph.NewBuilder("codegen_dag").
+		Vertex("prompt_const").Op("StringConstOp").
+		Params(map[string]string{"Value": prompt}).
+		Output("Result", "prompt_const_out").
+
+		Vertex("library_const").Op("StringConstOp").
+		Params(map[string]string{"Value": library}).
+		Output("Result", "library_const_out").
+
+		Vertex("design_const").Op("StringConstOp").
+		Params(map[string]string{"Value": approvedDesign}).
+		Output("Result", "design_const_out").
 
 		Vertex("generate").Op("GenerateOp").
-		Input("Prompt", "user_prompt").
-		Input("LibraryDescription", "lib_desc").
+		Input("Prompt", "prompt_const_out").
+		Input("LibraryDescription", "library_const_out").
+		Input("ApprovedDesign", "design_const_out").
 		Output("GoFiles", "go_files").
 
 		Vertex("write").Op("WriteFilesOp").
@@ -82,8 +102,9 @@ func buildDriverDAG(dagAIModulePath string) (*graph.Graph, error) {
 
 		Vertex("fallback").Op("FallbackOp").
 		Params(map[string]string{"dag_ai_module_path": dagAIModulePath}).
-		Input("Prompt", "user_prompt").
-		Input("LibraryDescription", "lib_desc").
+		Input("Prompt", "prompt_const_out").
+		Input("LibraryDescription", "library_const_out").
+		Input("ApprovedDesign", "design_const_out").
 		Input("CompileExitCode", "compile_exit").
 		Input("CompileStderr", "compile_stderr").
 		Input("GoFilesOriginal", "go_files").
@@ -92,54 +113,12 @@ func buildDriverDAG(dagAIModulePath string) (*graph.Graph, error) {
 		Output("BinPath", "final_bin_path").
 		Output("Stderr", "final_compile_stderr").
 
-		Vertex("run").Op("RunOp").
-		OnError(config.OnErrorContinue).
-		Input("BinPath", "final_bin_path").
-		Input("CompileStderr", "final_compile_stderr").
-		Output("Stdout", "run_stdout").
-		Output("Stderr", "run_stderr").
-		Output("ExitCode", "run_exit").
-
-		Vertex("output").Op("OutputOp").
-		Input("RawStdout", "run_stdout").
-		Input("RawStderr", "run_stderr").
-		Input("ExitCode", "run_exit").
-		Output("Result", "final_result").
-		Output("AINodes", "final_ai_nodes").
-		Output("ErrorMsg", "run_error").
-
 		Build()
 }
 
-func printResults(result string, aiNodesRaw any) {
-	fmt.Println("\n--- Result ---")
-	fmt.Println(result)
-
-	// aiNodesRaw is *string containing JSON array
-	nodesPtr, ok := aiNodesRaw.(*string)
-	if !ok || nodesPtr == nil || *nodesPtr == "" || *nodesPtr == "null" {
-		return
-	}
-
-	var nodes []AINodeDiag
-	if err := json.Unmarshal([]byte(*nodesPtr), &nodes); err != nil || len(nodes) == 0 {
-		return
-	}
-
-	fmt.Println("\n--- AI-Powered Node Diagnostics ---")
-	for _, n := range nodes {
-		fmt.Println(n.Op)
-		var inputParts []string
-		for k, v := range n.Inputs {
-			inputParts = append(inputParts, fmt.Sprintf("%s=%v", k, v))
-		}
-		fmt.Printf("  Inputs:    %s\n", strings.Join(inputParts, ", "))
-		fmt.Printf("  Output:    %v\n", n.Output)
-		fmt.Printf("  Reasoning: %s\n", n.Reasoning)
-	}
-}
-
 func registerDriverOps() {
+	operator.RegisterOp[DAGDesignOp]()
+	operator.RegisterOp[DAGDesignRefineOp]()
 	operator.RegisterOp[PromptOp]()
 	operator.RegisterOp[LibraryScanOp]()
 	operator.RegisterOp[GenerateOp]()
@@ -167,48 +146,86 @@ func main() {
 	}
 	defer pool.Release()
 
-	g, err := buildDriverDAG(modulePath)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+
+	// ── Phase 1: Design ──────────────────────────────────────────────────────────
+	designDAG, err := buildDesignDAG()
 	if err != nil {
-		log.Fatalf("buildDriverDAG: %v", err)
+		log.Fatalf("buildDesignDAG: %v", err)
 	}
-	eng, err := dagor.NewEngine(g, pool)
+	eng1, err := dagor.NewEngine(designDAG, pool)
 	if err != nil {
-		log.Fatalf("NewEngine: %v", err)
+		log.Fatalf("NewEngine (design): %v", err)
+	}
+	if err := eng1.Run(ctx); err != nil {
+		log.Fatalf("design DAG run: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	runErr := eng.Run(ctx)
+	promptRaw, _ := eng1.GetOutput("prompt_out")
+	libraryRaw, _ := eng1.GetOutput("library_out")
+	designRaw, _ := eng1.GetOutput("design_out")
 
-	resultRaw, _ := eng.GetOutput("final_result")
-	errMsgRaw, _ := eng.GetOutput("run_error")
-	aiNodesRaw, _ := eng.GetOutput("final_ai_nodes")
+	promptStr := *(promptRaw.(*string))
+	libraryStr := *(libraryRaw.(*string))
+	approvedDesign := *(designRaw.(*string))
+	eng1.Close(ctx)
 
-	result := ""
-	if resultRaw != nil {
-		result = *(resultRaw.(*string))
-	}
-	errMsg := ""
-	if errMsgRaw != nil {
-		errMsg = *(errMsgRaw.(*string))
-	}
+	// ── Phase 2: Review loop (up to 3 rounds) ───────────────────────────────────
+	reader := bufio.NewReader(os.Stdin)
+	for round := 1; round <= 3; round++ {
+		fmt.Printf("\n═══ DAG DESIGN (round %d/3) ═══\n\n%s\n", round, approvedDesign)
+		fmt.Print("\nPress Enter to approve, or type feedback to refine: ")
+		feedback, _ := reader.ReadString('\n')
+		feedback = strings.TrimSpace(feedback)
 
-	cancel()
-	eng.Close(ctx)
-
-	if errMsg == "" && result != "" {
-		printResults(result, aiNodesRaw)
-		return
-	}
-
-	// OutputOp never ran (upstream stage failed before it could set errMsg).
-	if errMsg == "" {
-		if runErr != nil {
-			errMsg = fmt.Sprintf("pipeline error: %v", runErr)
-		} else {
-			errMsg = "pipeline produced no output (check debug logs)"
+		if feedback == "" || strings.EqualFold(feedback, "y") || strings.EqualFold(feedback, "yes") {
+			fmt.Println("Design approved.")
+			break
 		}
+
+		if round == 3 {
+			fmt.Println("Max refinement rounds reached — proceeding with current design.")
+			break
+		}
+
+		refineDAG, err := buildRefineDAG(promptStr, libraryStr, approvedDesign, feedback)
+		if err != nil {
+			log.Fatalf("buildRefineDAG: %v", err)
+		}
+		eng2, err := dagor.NewEngine(refineDAG, pool)
+		if err != nil {
+			log.Fatalf("NewEngine (refine): %v", err)
+		}
+		if err := eng2.Run(ctx); err != nil {
+			log.Fatalf("refine DAG run: %v", err)
+		}
+		refinedRaw, _ := eng2.GetOutput("design_out")
+		approvedDesign = *(refinedRaw.(*string))
+		eng2.Close(ctx)
 	}
 
-	fmt.Fprintf(os.Stderr, "Failed: %s\n", errMsg)
-	os.Exit(1)
+	// ── Phase 3: Codegen ─────────────────────────────────────────────────────────
+	codegenDAG, err := buildCodegenDAG(promptStr, libraryStr, approvedDesign, modulePath)
+	if err != nil {
+		log.Fatalf("buildCodegenDAG: %v", err)
+	}
+	eng3, err := dagor.NewEngine(codegenDAG, pool)
+	if err != nil {
+		log.Fatalf("NewEngine (codegen): %v", err)
+	}
+	if err := eng3.Run(ctx); err != nil {
+		eng3.Close(ctx)
+		log.Fatalf("codegen DAG run: %v", err)
+	}
+
+	binPathRaw, _ := eng3.GetOutput("final_bin_path")
+	eng3.Close(ctx)
+
+	binPath := ""
+	if binPathRaw != nil {
+		binPath = *(binPathRaw.(*string))
+	}
+
+	fmt.Printf("\n--- Generated Binary ---\n%s\n", binPath)
 }

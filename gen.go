@@ -1,3 +1,5 @@
+//go:generate daggen -type=DAGDesignOp -output=driver_dagdesign_gen.go
+//go:generate daggen -type=DAGDesignRefineOp -output=driver_dagdesignrefine_gen.go
 //go:generate daggen -type=PromptOp -output=driver_prompt_gen.go
 //go:generate daggen -type=LibraryScanOp -output=driver_libscan_gen.go
 //go:generate daggen -type=GenerateOp -output=driver_generate_gen.go

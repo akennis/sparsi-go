@@ -2,17 +2,16 @@ package library
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 
-	"github.com/google/generative-ai-go/genai"
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/wwz16/dagor/config"
 	"github.com/wwz16/dagor/operator"
-	"google.golang.org/api/option"
 )
 
 const ModeSelectOpDescription = `ModeSelectOp: AI-powered classifier — maps arbitrary input text to exactly one of a fixed set of categories.
@@ -61,23 +60,8 @@ func (op *ModeSelectOp) Reset() error { return nil }
 func (op *ModeSelectOp) Run(ctx context.Context) error {
 	log.Printf("[DEBUG] ModeSelectOp: classifying %q into %v", *op.Input, op.categories)
 
-	apiKey := os.Getenv("GOOGLE_GENAI_API_KEY")
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
-	if err != nil {
-		return fmt.Errorf("genai client: %w", err)
-	}
-	defer client.Close()
-
-	model := client.GenerativeModel("gemini-flash-latest")
-	model.ResponseMIMEType = "application/json"
-	model.ResponseSchema = &genai.Schema{
-		Type: genai.TypeObject,
-		Properties: map[string]*genai.Schema{
-			"result":    {Type: genai.TypeString},
-			"reasoning": {Type: genai.TypeString},
-		},
-		Required: []string{"result", "reasoning"},
-	}
+	apiKey := os.Getenv("CLAUDE_API_KEY")
+	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
 	catList := strings.Join(op.categories, ", ")
 	basePrompt := fmt.Sprintf(
@@ -95,28 +79,28 @@ func (op *ModeSelectOp) Run(ctx context.Context) error {
 	prompt := basePrompt
 	var lastErr string
 	for attempt := 0; attempt <= op.maxRetries; attempt++ {
-		resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+		msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+			Model:     anthropic.ModelClaudeSonnet4_6,
+			MaxTokens: 64,
+			System: []anthropic.TextBlockParam{
+				{Text: "Respond with only the requested value. No explanation, no punctuation, no formatting."},
+			},
+			Messages: []anthropic.MessageParam{
+				anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
+			},
+		})
 		if err != nil {
 			return fmt.Errorf("generate content: %w", err)
 		}
-		if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
-			return fmt.Errorf("no candidates in response")
-		}
+
 		var raw string
-		for _, part := range resp.Candidates[0].Content.Parts {
-			raw += fmt.Sprintf("%v", part)
+		for _, block := range msg.Content {
+			if block.Type == "text" {
+				raw += block.Text
+			}
 		}
-		var envelope struct {
-			Result    string `json:"result"`
-			Reasoning string `json:"reasoning"`
-		}
-		if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
-			lastErr = fmt.Sprintf("invalid JSON: %v", err)
-			prompt = basePrompt + fmt.Sprintf("\n\nPrevious response was not valid JSON (%s). Try again.", lastErr)
-			log.Printf("[DEBUG] ModeSelectOp: attempt %d parse failed: %v", attempt+1, lastErr)
-			continue
-		}
-		result := strings.TrimSpace(envelope.Result)
+
+		result := strings.TrimSpace(raw)
 		if !catSet[result] {
 			lastErr = fmt.Sprintf("result %q is not one of %v", result, op.categories)
 			prompt = basePrompt + fmt.Sprintf("\n\nPrevious result %q was invalid — must be exactly one of: %s.", result, catList)
@@ -124,8 +108,7 @@ func (op *ModeSelectOp) Run(ctx context.Context) error {
 			continue
 		}
 		op.Result = result
-		op.Reasoning = envelope.Reasoning
-		log.Printf("[DEBUG] ModeSelectOp: result=%q reasoning=%q", op.Result, op.Reasoning)
+		log.Printf("[DEBUG] ModeSelectOp: result=%q", op.Result)
 		return nil
 	}
 	return fmt.Errorf("ModeSelectOp: all %d attempts failed; last error: %s", op.maxRetries+1, lastErr)
