@@ -117,10 +117,21 @@ func buildCodegenDAG(prompt, library, approvedDesign, dagAIModulePath string) (*
 		Input("GoFiles", "go_files").
 		Output("RequiredEnvVars", "required_env_vars").
 
+		Vertex("mcpbai").Op("MCPBManifestAIOp").
+		Input("Prompt", "prompt_const_out").
+		Input("ApprovedDesign", "design_const_out").
+		Input("BinPath", "final_bin_path").
+		Output("Name", "ai_mcpb_name").
+		Output("DisplayName", "ai_mcpb_display_name").
+		Output("Description", "ai_mcpb_description").
+
 		Vertex("mcpbprompt").Op("MCPBManifestPromptOp").
 		Input("Prompt", "prompt_const_out").
 		Input("BinPath", "final_bin_path").
 		Input("RequiredEnvVars", "required_env_vars").
+		Input("DefaultName", "ai_mcpb_name").
+		Input("DefaultDisplayName", "ai_mcpb_display_name").
+		Input("DefaultDescription", "ai_mcpb_description").
 		Output("Name", "mcpb_name").
 		Output("DisplayName", "mcpb_display_name").
 		Output("Description", "mcpb_description").
@@ -152,6 +163,7 @@ func registerDriverOps() {
 	operator.RegisterOp[RunOp]()
 	operator.RegisterOp[OutputOp]()
 	operator.RegisterOp[EnvScanOp]()
+	operator.RegisterOp[MCPBManifestAIOp]()
 	operator.RegisterOp[MCPBManifestPromptOp]()
 	operator.RegisterOp[PackageMCPBOp]()
 }
@@ -245,8 +257,8 @@ func main() {
 	}
 	runErr := eng3.Run(ctx)
 	log.Printf("[DEBUG] codegen DAG run finished, err=%v", runErr)
-	log.Printf("[DEBUG] envscan skipped=%v, mcpbprompt skipped=%v, package skipped=%v",
-		eng3.VertexSkipped("envscan"), eng3.VertexSkipped("mcpbprompt"), eng3.VertexSkipped("package"))
+	log.Printf("[DEBUG] envscan skipped=%v, mcpbai skipped=%v, mcpbprompt skipped=%v, package skipped=%v",
+		eng3.VertexSkipped("envscan"), eng3.VertexSkipped("mcpbai"), eng3.VertexSkipped("mcpbprompt"), eng3.VertexSkipped("package"))
 	if runErr != nil {
 		eng3.Close(ctx)
 		log.Fatalf("codegen DAG run: %v", runErr)

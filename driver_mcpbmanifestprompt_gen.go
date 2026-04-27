@@ -7,7 +7,7 @@ import (
 
 func (op *MCPBManifestPromptOp) InputFields() map[string]any {
 	return map[string]any {
-		"Prompt": &op.Prompt,"BinPath": &op.BinPath,"RequiredEnvVars": &op.RequiredEnvVars,
+		"Prompt": &op.Prompt,"BinPath": &op.BinPath,"RequiredEnvVars": &op.RequiredEnvVars,"DefaultName": &op.DefaultName,"DefaultDisplayName": &op.DefaultDisplayName,"DefaultDescription": &op.DefaultDescription,
 	}
 }
 
@@ -37,7 +37,25 @@ func (op *MCPBManifestPromptOp) SetInputField(field string, value any) error {
 		} else {
 			return fmt.Errorf("field %s is not type of *string", field)
 		}
-
+	case "DefaultName":
+		if val, ok := value.(*string); ok {
+			op.DefaultName = val
+		} else {
+			return fmt.Errorf("field %s is not type of *string", field)
+		}
+	case "DefaultDisplayName":
+		if val, ok := value.(*string); ok {
+			op.DefaultDisplayName = val
+		} else {
+			return fmt.Errorf("field %s is not type of *string", field)
+		}
+	case "DefaultDescription":
+		if val, ok := value.(*string); ok {
+			op.DefaultDescription = val
+		} else {
+			return fmt.Errorf("field %s is not type of *string", field)
+		}
+	
 	default:
 		return fmt.Errorf("field %s is not defined", field)
 	}
@@ -51,7 +69,13 @@ func (op *MCPBManifestPromptOp) ResetFields() {
 	op.BinPath = zeroBinPath
 	var zeroRequiredEnvVars *string
 	op.RequiredEnvVars = zeroRequiredEnvVars
-
+	var zeroDefaultName *string
+	op.DefaultName = zeroDefaultName
+	var zeroDefaultDisplayName *string
+	op.DefaultDisplayName = zeroDefaultDisplayName
+	var zeroDefaultDescription *string
+	op.DefaultDescription = zeroDefaultDescription
+	
 	var zeroName string
 	op.Name = zeroName
 	var zeroDisplayName string
@@ -60,5 +84,5 @@ func (op *MCPBManifestPromptOp) ResetFields() {
 	op.Description = zeroDescription
 	var zeroAuthor string
 	op.Author = zeroAuthor
-
+	
 }

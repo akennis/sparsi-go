@@ -55,7 +55,7 @@ func (op *PackageMCPBOp) SetInputField(field string, value any) error {
 		} else {
 			return fmt.Errorf("field %s is not type of *string", field)
 		}
-
+	
 	default:
 		return fmt.Errorf("field %s is not defined", field)
 	}
@@ -75,8 +75,8 @@ func (op *PackageMCPBOp) ResetFields() {
 	op.Author = zeroAuthor
 	var zeroRequiredEnvVars *string
 	op.RequiredEnvVars = zeroRequiredEnvVars
-
+	
 	var zeroMCPBPath string
 	op.MCPBPath = zeroMCPBPath
-
+	
 }

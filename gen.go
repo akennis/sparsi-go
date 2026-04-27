@@ -11,6 +11,7 @@
 //go:generate daggen -type=FallbackOp -output=driver_fallback_gen.go
 //go:generate daggen -type=ValidateDAGOp -output=driver_validate_gen.go
 //go:generate daggen -type=EnvScanOp -output=driver_envscan_gen.go
+//go:generate daggen -type=MCPBManifestAIOp -output=driver_mcpbmanifestai_gen.go
 //go:generate daggen -type=MCPBManifestPromptOp -output=driver_mcpbmanifestprompt_gen.go
 //go:generate daggen -type=PackageMCPBOp -output=driver_packagemcpb_gen.go
 package main

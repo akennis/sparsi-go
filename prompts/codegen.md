@@ -140,7 +140,7 @@ func runWorkflow(ctx context.Context, pool *ants.Pool, input UserInput) (string,
 
 ## Step 5 — Implement runCLIProgram()
 
-Reads user input and delegates entirely to `runWorkflow`:
+Reads user input and delegates entirely to `runWorkflow`. Print the result to stdout — this is the CLI output contract. (Unless the task description says otherwise.)
 
 ```go
 func runCLIProgram(ctx context.Context, pool *ants.Pool) error {
@@ -162,7 +162,8 @@ func runCLIProgram(ctx context.Context, pool *ants.Pool) error {
 
 Registers the workflow as a single MCP tool. Populates `UserInput` from tool call arguments and
 delegates to the same `runWorkflow`. Use `github.com/mark3labs/mcp-go/mcp` and
-`github.com/mark3labs/mcp-go/server`.
+`github.com/mark3labs/mcp-go/server`. Return results exclusively via `mcp.NewToolResultText` /
+`mcp.NewToolResultError` — do NOT write anything to stdout in MCP mode. (Unless the task description says otherwise.)
 
 IMPORTANT: `server.ServeStdio` is long-lived — it handles multiple tool calls over the process
 lifetime. Do NOT pass a short-lived context to `runMCPServer`; use `context.Background()` for the
@@ -197,6 +198,34 @@ func runMCPServer(pool *ants.Pool) error {
     return server.ServeStdio(s)
 }
 ```
+
+## Step 6b — Resolve environment variables in main()
+
+ALL environment variables MUST be read with literal string names in `main()` using `os.Getenv("VAR_NAME")`.
+Never call `os.Getenv` inside an operator's `Setup` or `Run`, and never store the variable name in a
+struct field or config param to call `os.Getenv(someVariable)` indirectly.
+
+Resolved values flow downstream as fields on `UserInput` (for user-supplied secrets) or as additional
+parameters to `runWorkflow` / `buildGraph`, where they enter the DAG via `StringConstOp` params or direct
+input wires.
+
+```go
+func main() {
+    // Resolve ALL env vars here, with literal names, before any DAG work.
+    newsAPIKey := os.Getenv("NEWS_API_KEY")
+    if newsAPIKey == "" {
+        log.Fatal("NEWS_API_KEY environment variable is not set")
+    }
+
+    // Pass values into UserInput so they flow through the DAG as data.
+    // readCLIInput() only reads stdin; env-var fields are populated here.
+    input := UserInput{NewsAPIKey: newsAPIKey}
+    // ...
+}
+```
+
+Operators receive API keys and secrets as normal `dag:"input"` wires — they never call `os.Getenv` themselves.
+This keeps every env var name visible as a string literal at the call site, which is required for manifest generation.
 
 ## Step 7 — Wire up main() with --mode flag
 
@@ -402,7 +431,9 @@ func buildGraph(sourceVal int) (*graph.Graph, error) {
       "b": 2   // ← missing comma        "b": 2,  // ← required
     }                                  }
 
-# STDOUT: result JSON MUST go to stdout via fmt.Println — NOT log.Printf (that goes to stderr).
+# OUTPUT ROUTING — unless the user's task description specifically overrides this:
+  * CLI mode   (`--mode cli`):  all results MUST go to stdout via `fmt.Println`. Never use `log.Printf` for results (that goes to stderr).
+  * MCP mode   (`--mode mcp`):  all results MUST be returned via `mcp.NewToolResultText` (or `mcp.NewToolResultError` on failure). Never write results to stdout in MCP mode — MCP clients read the protocol, not raw stdout.
 
 # COALESCE OPS — registered by _ "github.com/wwz16/dagor/operator/builtin" (ALWAYS add this import when using any coalesce vertex):
 

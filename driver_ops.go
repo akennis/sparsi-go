@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -37,6 +38,9 @@ var dagDesignPromptTemplate string
 
 //go:embed prompts/dag_design_refine.md
 var dagDesignRefinePromptTemplate string
+
+//go:embed prompts/mcpb_manifest_ai.md
+var mcpbManifestAIPromptTemplate string
 
 // AINodeDiag contains diagnostics for a single AI-powered node.
 type AINodeDiag struct {
@@ -754,15 +758,84 @@ func (op *EnvScanOp) Run(ctx context.Context) error {
 	return nil
 }
 
-// MCPBManifestPromptOp interactively prompts the user for MCPB manifest fields.
-type MCPBManifestPromptOp struct {
+// MCPBManifestAIOp calls Claude to generate MCPB manifest field defaults from the original
+// prompt and approved DAG design. It outputs three fields as parsed from a single CSV line.
+type MCPBManifestAIOp struct {
 	Prompt          *string `dag:"input"`
+	ApprovedDesign  *string `dag:"input"`
 	BinPath         *string `dag:"input"`
-	RequiredEnvVars *string `dag:"input"`
 	Name            string  `dag:"output"`
 	DisplayName     string  `dag:"output"`
 	Description     string  `dag:"output"`
-	Author          string  `dag:"output"`
+}
+
+func (op *MCPBManifestAIOp) Setup(params *config.Params) error { return nil }
+func (op *MCPBManifestAIOp) Reset() error                      { return nil }
+func (op *MCPBManifestAIOp) Run(ctx context.Context) error {
+	if *op.BinPath == "COMPILE_FAILED" || *op.BinPath == "" {
+		log.Printf("[DEBUG] MCPBManifestAIOp: skipped (compile failed or no bin)")
+		return nil
+	}
+
+	log.Printf("[DEBUG] MCPBManifestAIOp: calling Claude for manifest metadata")
+	apiKey := os.Getenv("CLAUDE_API_KEY")
+	client := anthropic.NewClient(option.WithAPIKey(apiKey))
+
+	prompt := strings.NewReplacer(
+		"{{PROMPT}}", *op.Prompt,
+		"{{APPROVED_DESIGN}}", *op.ApprovedDesign,
+	).Replace(mcpbManifestAIPromptTemplate)
+
+	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.ModelClaudeSonnet4_6,
+		MaxTokens: 256,
+		System: []anthropic.TextBlockParam{
+			{Text: "Respond with exactly one CSV line. No explanation, no extra whitespace."},
+		},
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("MCPBManifestAIOp: %w", err)
+	}
+
+	var raw string
+	for _, block := range msg.Content {
+		if block.Type == "text" {
+			raw += block.Text
+		}
+	}
+	raw = strings.TrimSpace(raw)
+
+	r := csv.NewReader(strings.NewReader(raw))
+	fields, err := r.Read()
+	if err != nil || len(fields) < 3 {
+		log.Printf("[DEBUG] MCPBManifestAIOp: CSV parse failed (%v), raw=%q", err, raw)
+		return nil
+	}
+
+	op.Name = strings.TrimSpace(fields[0])
+	op.DisplayName = strings.TrimSpace(fields[1])
+	op.Description = strings.TrimSpace(fields[2])
+	log.Printf("[DEBUG] MCPBManifestAIOp: name=%q display=%q", op.Name, op.DisplayName)
+	return nil
+}
+
+// MCPBManifestPromptOp interactively prompts the user for MCPB manifest fields.
+// DefaultName, DefaultDisplayName, and DefaultDescription are AI-generated defaults
+// supplied by MCPBManifestAIOp upstream; if empty, simple heuristics are used instead.
+type MCPBManifestPromptOp struct {
+	Prompt             *string `dag:"input"`
+	BinPath            *string `dag:"input"`
+	RequiredEnvVars    *string `dag:"input"`
+	DefaultName        *string `dag:"input"`
+	DefaultDisplayName *string `dag:"input"`
+	DefaultDescription *string `dag:"input"`
+	Name               string  `dag:"output"`
+	DisplayName        string  `dag:"output"`
+	Description        string  `dag:"output"`
+	Author             string  `dag:"output"`
 }
 
 func (op *MCPBManifestPromptOp) Setup(params *config.Params) error { return nil }
@@ -773,42 +846,59 @@ func (op *MCPBManifestPromptOp) Run(ctx context.Context) error {
 		return nil
 	}
 
-	prompt := *op.Prompt
-
-	// Compute defaultName: lowercase slug of first 40 chars
-	slug := strings.ToLower(prompt)
-	if len(slug) > 40 {
-		slug = slug[:40]
+	// Use AI-generated defaults when available, fall back to heuristics.
+	defaultName := ""
+	if op.DefaultName != nil {
+		defaultName = *op.DefaultName
 	}
-	var slugBuilder strings.Builder
-	for _, r := range slug {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			slugBuilder.WriteRune(r)
-		} else {
-			slugBuilder.WriteRune('-')
+	if defaultName == "" {
+		prompt := *op.Prompt
+		slug := strings.ToLower(prompt)
+		if len(slug) > 40 {
+			slug = slug[:40]
+		}
+		var slugBuilder strings.Builder
+		for _, r := range slug {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				slugBuilder.WriteRune(r)
+			} else {
+				slugBuilder.WriteRune('-')
+			}
+		}
+		defaultName = strings.Trim(slugBuilder.String(), "-")
+		for strings.Contains(defaultName, "--") {
+			defaultName = strings.ReplaceAll(defaultName, "--", "-")
 		}
 	}
-	defaultName := strings.Trim(slugBuilder.String(), "-")
-	for strings.Contains(defaultName, "--") {
-		defaultName = strings.ReplaceAll(defaultName, "--", "-")
-	}
 
-	// Compute defaultDisplay: title-case words from defaultName
-	words := strings.Split(defaultName, "-")
-	for i, w := range words {
-		if len(w) > 0 {
-			words[i] = strings.ToUpper(w[:1]) + w[1:]
+	defaultDisplay := ""
+	if op.DefaultDisplayName != nil {
+		defaultDisplay = *op.DefaultDisplayName
+	}
+	if defaultDisplay == "" {
+		words := strings.Split(defaultName, "-")
+		for i, w := range words {
+			if len(w) > 0 {
+				words[i] = strings.ToUpper(w[:1]) + w[1:]
+			}
 		}
+		defaultDisplay = strings.Join(words, " ")
 	}
-	defaultDisplay := strings.Join(words, " ")
 
-	// Compute defaultDesc: first line of prompt, truncated to 120 chars
-	firstLine := prompt
-	if idx := strings.IndexAny(prompt, "\n\r"); idx >= 0 {
-		firstLine = prompt[:idx]
+	defaultDesc := ""
+	if op.DefaultDescription != nil {
+		defaultDesc = *op.DefaultDescription
 	}
-	if len(firstLine) > 120 {
-		firstLine = firstLine[:120]
+	if defaultDesc == "" {
+		prompt := *op.Prompt
+		firstLine := prompt
+		if idx := strings.IndexAny(prompt, "\n\r"); idx >= 0 {
+			firstLine = prompt[:idx]
+		}
+		if len(firstLine) > 120 {
+			firstLine = firstLine[:120]
+		}
+		defaultDesc = firstLine
 	}
 
 	// Print env vars summary
@@ -836,7 +926,7 @@ func (op *MCPBManifestPromptOp) Run(ctx context.Context) error {
 	fmt.Println("\n--- MCPB Manifest ---")
 	op.Name = readField("Name", defaultName)
 	op.DisplayName = readField("Display name", defaultDisplay)
-	op.Description = readField("Description", firstLine)
+	op.Description = readField("Description", defaultDesc)
 	op.Author = readField("Author", "")
 
 	log.Printf("[DEBUG] MCPBManifestPromptOp: name=%q display=%q author=%q", op.Name, op.DisplayName, op.Author)
