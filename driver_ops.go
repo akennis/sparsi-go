@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -683,5 +686,299 @@ func (op *FallbackOp) Run(ctx context.Context) error {
 
 	op.BinPath = binPath
 	log.Printf("[DEBUG] FallbackOp: fallback compile OK, bin=%s", op.BinPath)
+	return nil
+}
+
+// EnvVarSpec describes a single environment variable for the MCPB manifest.
+type EnvVarSpec struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Sensitive   bool   `json:"sensitive"`
+	Required    bool   `json:"required"`
+}
+
+// EnvScanOp scans generated Go source for os.Getenv calls and AI op usage.
+type EnvScanOp struct {
+	GoFiles         *string `dag:"input"`
+	RequiredEnvVars string  `dag:"output"` // JSON array of EnvVarSpec
+}
+
+func (op *EnvScanOp) Setup(params *config.Params) error { return nil }
+func (op *EnvScanOp) Reset() error                      { return nil }
+func (op *EnvScanOp) Run(ctx context.Context) error {
+	log.Printf("[DEBUG] EnvScanOp: scanning generated Go source for env vars")
+	src := *op.GoFiles
+
+	knownDescriptions := map[string]EnvVarSpec{
+		"CLAUDE_API_KEY": {
+			Name:        "CLAUDE_API_KEY",
+			Description: "Anthropic Claude API key (required for AI ops)",
+			Sensitive:   true,
+			Required:    false,
+		},
+	}
+
+	// Collect unique env var names from os.Getenv calls
+	re := regexp.MustCompile(`os\.Getenv\("([^"]+)"\)`)
+	matches := re.FindAllStringSubmatch(src, -1)
+	seen := make(map[string]bool)
+	var specs []EnvVarSpec
+	for _, m := range matches {
+		name := m[1]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if spec, ok := knownDescriptions[name]; ok {
+			specs = append(specs, spec)
+		} else {
+			specs = append(specs, EnvVarSpec{Name: name, Description: name})
+		}
+	}
+
+	// Check for AI op usage
+	aiOpRe := regexp.MustCompile(`\b\w*(AI|Compute)\w*Op\b`)
+	hasAI := strings.Contains(src, "AIComputeOp") ||
+		strings.Contains(src, "ModeSelectOp") ||
+		aiOpRe.MatchString(src)
+	if hasAI && !seen["CLAUDE_API_KEY"] {
+		specs = append(specs, knownDescriptions["CLAUDE_API_KEY"])
+	}
+
+	b, err := json.Marshal(specs)
+	if err != nil {
+		return fmt.Errorf("EnvScanOp marshal: %w", err)
+	}
+	op.RequiredEnvVars = string(b)
+	log.Printf("[DEBUG] EnvScanOp: found %d env vars", len(specs))
+	return nil
+}
+
+// MCPBManifestPromptOp interactively prompts the user for MCPB manifest fields.
+type MCPBManifestPromptOp struct {
+	Prompt          *string `dag:"input"`
+	BinPath         *string `dag:"input"`
+	RequiredEnvVars *string `dag:"input"`
+	Name            string  `dag:"output"`
+	DisplayName     string  `dag:"output"`
+	Description     string  `dag:"output"`
+	Author          string  `dag:"output"`
+}
+
+func (op *MCPBManifestPromptOp) Setup(params *config.Params) error { return nil }
+func (op *MCPBManifestPromptOp) Reset() error                      { return nil }
+func (op *MCPBManifestPromptOp) Run(ctx context.Context) error {
+	if *op.BinPath == "COMPILE_FAILED" || *op.BinPath == "" {
+		log.Printf("[DEBUG] MCPBManifestPromptOp: skipped (compile failed or no bin)")
+		return nil
+	}
+
+	prompt := *op.Prompt
+
+	// Compute defaultName: lowercase slug of first 40 chars
+	slug := strings.ToLower(prompt)
+	if len(slug) > 40 {
+		slug = slug[:40]
+	}
+	var slugBuilder strings.Builder
+	for _, r := range slug {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			slugBuilder.WriteRune(r)
+		} else {
+			slugBuilder.WriteRune('-')
+		}
+	}
+	defaultName := strings.Trim(slugBuilder.String(), "-")
+	for strings.Contains(defaultName, "--") {
+		defaultName = strings.ReplaceAll(defaultName, "--", "-")
+	}
+
+	// Compute defaultDisplay: title-case words from defaultName
+	words := strings.Split(defaultName, "-")
+	for i, w := range words {
+		if len(w) > 0 {
+			words[i] = strings.ToUpper(w[:1]) + w[1:]
+		}
+	}
+	defaultDisplay := strings.Join(words, " ")
+
+	// Compute defaultDesc: first line of prompt, truncated to 120 chars
+	firstLine := prompt
+	if idx := strings.IndexAny(prompt, "\n\r"); idx >= 0 {
+		firstLine = prompt[:idx]
+	}
+	if len(firstLine) > 120 {
+		firstLine = firstLine[:120]
+	}
+
+	// Print env vars summary
+	if op.RequiredEnvVars != nil && *op.RequiredEnvVars != "" {
+		var envSpecs []EnvVarSpec
+		if err := json.Unmarshal([]byte(*op.RequiredEnvVars), &envSpecs); err == nil && len(envSpecs) > 0 {
+			fmt.Println("\n--- Required environment variables for manifest ---")
+			for _, s := range envSpecs {
+				fmt.Printf("  %s: %s\n", s.Name, s.Description)
+			}
+		}
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	readField := func(label, def string) string {
+		fmt.Printf("%s [%s]: ", label, def)
+		line, _ := reader.ReadString('\n')
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return def
+		}
+		return line
+	}
+
+	fmt.Println("\n--- MCPB Manifest ---")
+	op.Name = readField("Name", defaultName)
+	op.DisplayName = readField("Display name", defaultDisplay)
+	op.Description = readField("Description", firstLine)
+	op.Author = readField("Author", "")
+
+	log.Printf("[DEBUG] MCPBManifestPromptOp: name=%q display=%q author=%q", op.Name, op.DisplayName, op.Author)
+	return nil
+}
+
+// PackageMCPBOp creates a .mcpb ZIP package from the compiled solution binary and a generated manifest.
+type PackageMCPBOp struct {
+	BinPath         *string `dag:"input"`
+	Name            *string `dag:"input"`
+	DisplayName     *string `dag:"input"`
+	Description     *string `dag:"input"`
+	Author          *string `dag:"input"`
+	RequiredEnvVars *string `dag:"input"` // JSON []EnvVarSpec
+	MCPBPath        string  `dag:"output"`
+}
+
+func (op *PackageMCPBOp) Setup(params *config.Params) error { return nil }
+func (op *PackageMCPBOp) Reset() error                      { return nil }
+func (op *PackageMCPBOp) Run(ctx context.Context) error {
+	if *op.BinPath == "COMPILE_FAILED" || *op.BinPath == "" {
+		log.Printf("[DEBUG] PackageMCPBOp: skipped (compile failed or no bin)")
+		return nil
+	}
+
+	var specs []EnvVarSpec
+	if op.RequiredEnvVars != nil && *op.RequiredEnvVars != "" {
+		if err := json.Unmarshal([]byte(*op.RequiredEnvVars), &specs); err != nil {
+			log.Printf("[DEBUG] PackageMCPBOp: failed to parse RequiredEnvVars: %v", err)
+		}
+	}
+
+	type userConfigEntry struct {
+		Type        string `json:"type"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Sensitive   bool   `json:"sensitive"`
+		Required    bool   `json:"required"`
+	}
+	type mcpConfig struct {
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env"`
+	}
+	type serverBlock struct {
+		Type       string    `json:"type"`
+		EntryPoint string    `json:"entry_point"`
+		MCPConfig  mcpConfig `json:"mcp_config"`
+	}
+	type compatibility struct {
+		Platforms []string `json:"platforms"`
+	}
+	type authorBlock struct {
+		Name string `json:"name"`
+	}
+	type manifestDoc struct {
+		ManifestVersion string                     `json:"manifest_version"`
+		Name            string                     `json:"name"`
+		DisplayName     string                     `json:"display_name"`
+		Author          authorBlock                `json:"author"`
+		Version         string                     `json:"version"`
+		Description     string                     `json:"description"`
+		Server          serverBlock                `json:"server"`
+		ToolsGenerated  bool                       `json:"tools_generated"`
+		UserConfig      map[string]userConfigEntry `json:"user_config"`
+		Compatibility   compatibility              `json:"compatibility"`
+	}
+
+	envMap := make(map[string]string)
+	userConfig := make(map[string]userConfigEntry)
+	for _, s := range specs {
+		lowerName := strings.ToLower(s.Name)
+		envMap[s.Name] = fmt.Sprintf("${user_config.%s}", lowerName)
+		userConfig[lowerName] = userConfigEntry{
+			Type:        "string",
+			Title:       s.Description,
+			Description: s.Description,
+			Sensitive:   s.Sensitive,
+			Required:    s.Required,
+		}
+	}
+
+	m := manifestDoc{
+		ManifestVersion: "0.3",
+		Name:            *op.Name,
+		DisplayName:     *op.DisplayName,
+		Author:          authorBlock{Name: *op.Author},
+		Version:         "1.0.0",
+		Description:     *op.Description,
+		Server: serverBlock{
+			Type:       "binary",
+			EntryPoint: "server/solution_bin.exe",
+			MCPConfig: mcpConfig{
+				Command: "${__dirname}/server/solution_bin.exe",
+				Args:    []string{"--mode", "mcp"},
+				Env:     envMap,
+			},
+		},
+		ToolsGenerated: true,
+		UserConfig:     userConfig,
+		Compatibility:  compatibility{Platforms: []string{"win32"}},
+	}
+
+	manifestBytes, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("PackageMCPBOp marshal manifest: %w", err)
+	}
+
+	binBytes, err := os.ReadFile(*op.BinPath)
+	if err != nil {
+		return fmt.Errorf("PackageMCPBOp read bin: %w", err)
+	}
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+
+	mf, err := zw.Create("manifest.json")
+	if err != nil {
+		return fmt.Errorf("PackageMCPBOp create manifest.json in zip: %w", err)
+	}
+	if _, err := mf.Write(manifestBytes); err != nil {
+		return fmt.Errorf("PackageMCPBOp write manifest.json: %w", err)
+	}
+
+	bf, err := zw.Create("server/solution_bin.exe")
+	if err != nil {
+		return fmt.Errorf("PackageMCPBOp create bin in zip: %w", err)
+	}
+	if _, err := bf.Write(binBytes); err != nil {
+		return fmt.Errorf("PackageMCPBOp write bin: %w", err)
+	}
+
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("PackageMCPBOp close zip: %w", err)
+	}
+
+	outPath := filepath.Join(filepath.Dir(filepath.Dir(*op.BinPath)), "solution.mcpb")
+	if err := os.WriteFile(outPath, zipBuf.Bytes(), 0644); err != nil {
+		return fmt.Errorf("PackageMCPBOp write mcpb: %w", err)
+	}
+
+	op.MCPBPath = outPath
+	log.Printf("[DEBUG] PackageMCPBOp: written to %s (%d bytes)", outPath, zipBuf.Len())
 	return nil
 }

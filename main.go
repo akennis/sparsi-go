@@ -113,6 +113,28 @@ func buildCodegenDAG(prompt, library, approvedDesign, dagAIModulePath string) (*
 		Output("BinPath", "final_bin_path").
 		Output("Stderr", "final_compile_stderr").
 
+		Vertex("envscan").Op("EnvScanOp").
+		Input("GoFiles", "go_files").
+		Output("RequiredEnvVars", "required_env_vars").
+
+		Vertex("mcpbprompt").Op("MCPBManifestPromptOp").
+		Input("Prompt", "prompt_const_out").
+		Input("BinPath", "final_bin_path").
+		Input("RequiredEnvVars", "required_env_vars").
+		Output("Name", "mcpb_name").
+		Output("DisplayName", "mcpb_display_name").
+		Output("Description", "mcpb_description").
+		Output("Author", "mcpb_author").
+
+		Vertex("package").Op("PackageMCPBOp").
+		Input("BinPath", "final_bin_path").
+		Input("Name", "mcpb_name").
+		Input("DisplayName", "mcpb_display_name").
+		Input("Description", "mcpb_description").
+		Input("Author", "mcpb_author").
+		Input("RequiredEnvVars", "required_env_vars").
+		Output("MCPBPath", "mcpb_path").
+
 		Build()
 }
 
@@ -129,6 +151,9 @@ func registerDriverOps() {
 	operator.RegisterOp[FallbackOp]()
 	operator.RegisterOp[RunOp]()
 	operator.RegisterOp[OutputOp]()
+	operator.RegisterOp[EnvScanOp]()
+	operator.RegisterOp[MCPBManifestPromptOp]()
+	operator.RegisterOp[PackageMCPBOp]()
 }
 
 func main() {
@@ -210,16 +235,25 @@ func main() {
 	if err != nil {
 		log.Fatalf("buildCodegenDAG: %v", err)
 	}
+	log.Printf("[DEBUG] codegen DAG built: %d vertices", codegenDAG.Size())
+	for name := range codegenDAG.Vertices() {
+		log.Printf("[DEBUG]   vertex: %s", name)
+	}
 	eng3, err := dagor.NewEngine(codegenDAG, pool)
 	if err != nil {
 		log.Fatalf("NewEngine (codegen): %v", err)
 	}
-	if err := eng3.Run(ctx); err != nil {
+	runErr := eng3.Run(ctx)
+	log.Printf("[DEBUG] codegen DAG run finished, err=%v", runErr)
+	log.Printf("[DEBUG] envscan skipped=%v, mcpbprompt skipped=%v, package skipped=%v",
+		eng3.VertexSkipped("envscan"), eng3.VertexSkipped("mcpbprompt"), eng3.VertexSkipped("package"))
+	if runErr != nil {
 		eng3.Close(ctx)
-		log.Fatalf("codegen DAG run: %v", err)
+		log.Fatalf("codegen DAG run: %v", runErr)
 	}
 
 	binPathRaw, _ := eng3.GetOutput("final_bin_path")
+	mcpbRaw, _ := eng3.GetOutput("mcpb_path")
 	eng3.Close(ctx)
 
 	binPath := ""
@@ -228,4 +262,10 @@ func main() {
 	}
 
 	fmt.Printf("\n--- Generated Binary ---\n%s\n", binPath)
+
+	if mcpbRaw != nil {
+		if p := *(mcpbRaw.(*string)); p != "" {
+			fmt.Printf("\n--- Generated MCPB ---\n%s\n", p)
+		}
+	}
 }

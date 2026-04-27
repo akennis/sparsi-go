@@ -25,7 +25,7 @@ The `go generate` steps use the `daggen` tool to regenerate `driver_*_gen.go` an
 
 ## Environment
 
-- `GOOGLE_GENAI_API_KEY` — required for GenerateOp to call the Gemini API, and forwarded to the generated solution binary
+- `CLAUDE_API_KEY` — required for all Claude API calls (design, codegen, AI library ops)
 
 ## Architecture
 
@@ -70,5 +70,4 @@ dag-ai/
 
 **Dependencies:**
 - [`dagor`](https://github.com/wwz16/dagor) — DAG execution engine
-- [`generative-ai-go`](https://github.com/google/generative-ai-go) — Google Gemini SDK (model: `gemini-2.5-flash-lite`)
 - [`ants/v2`](https://github.com/panjf2000/ants) — goroutine worker pool
