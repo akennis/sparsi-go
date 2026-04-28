@@ -63,7 +63,7 @@ why is non-obvious.
 
 ---
 
-## Group 1 — Comparison / predicate ops
+## Group 1 — Comparison / predicate ops ✅ DONE
 
 **Why:** dagor's conditional branching uses named predicates that read op
 outputs (see `llm-hints.md` lines 49-92). Today only `IfStringEqOp`

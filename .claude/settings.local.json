@@ -9,7 +9,14 @@
       "Read(//home/akennis/.dag-ai/solution/**)",
       "Skill(claude-api)",
       "Read(//mnt/c/Users/albert.kennis/projects/dagor/tools/**)",
-      "Read(//mnt/c/Users/albert.kennis/projects/dagor/cmd/**)"
+      "Read(//mnt/c/Users/albert.kennis/projects/dagor/cmd/**)",
+      "Bash(go generate *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(mkdir -p /tmp/out)",
+      "Bash(go test *)",
+      "Read(//mnt/c/Users/albert.kennis/projects/dagor/config/**)",
+      "Bash(go env *)",
+      "Bash(go vet *)"
     ]
   }
 }
