@@ -1,0 +1,6 @@
+Subject: Please add dark mode
+
+I love the product but staring at the bright white interface for 8 hours a day
+is killing my eyes. Is there any chance you could add a dark mode toggle? Even
+a system-default option would be amazing. Several of my coworkers have asked
+about this too — it would be a huge quality-of-life win for our whole team.

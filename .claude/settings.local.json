@@ -16,7 +16,10 @@
       "Bash(go test *)",
       "Read(//mnt/c/Users/albert.kennis/projects/dagor/config/**)",
       "Bash(go env *)",
-      "Bash(go vet *)"
+      "Bash(go vet *)",
+      "Bash(go run *)",
+      "Bash(curl -s --max-time 30 'https://www.themealdb.com/api/json/v1/1/search.php?s=Beef%20Wellington' -o /mnt/c/Users/albert.kennis/projects/clawdag-go/examples/02-recipe-analyzer/testdata/recipes/beef-wellington.json)",
+      "Bash(curl -s --max-time 30 'https://www.themealdb.com/api/json/v1/1/search.php?s=Chicken%20Curry' -o /mnt/c/Users/albert.kennis/projects/clawdag-go/examples/02-recipe-analyzer/testdata/recipes/chicken-curry.json)"
     ]
   }
 }

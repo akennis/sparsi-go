@@ -628,6 +628,40 @@ func buildGraph(sourceVal int) (*graph.Graph, error) {
       Input("Input", "trimmed_input").
       Output("Result", "color_result").
 
+  * MULTI-VERTEX LANE RULE: A single mode often drives MORE than one parallel op — e.g. a "billing"
+    classification triggers an extract op, a parse op, and an encoder, all running in parallel off
+    the same raw input. EVERY one of those parallel branch vertices gets its own Condition (same
+    predicate name across the lane) + ConditionInput (same mode wire). Skip-propagation then prunes
+    every downstream vertex that depends on a skipped producer, including the lane's encoder.
+    Do NOT introduce a per-lane "gate" / "passthrough" / "router" op that fans out the input to its
+    siblings — that is the same anti-pattern as ModeGateOp, just spelled differently. The lane-gate
+    op carries no compute, hides the routing in an extra vertex, and forces every downstream op to
+    re-pull the original wire instead of declaring its own Condition.
+
+    WRONG — gate vertex wraps the whole lane:
+      Vertex("gate_billing").Op("LaneGateOp").
+      Condition("lane_is_billing").ConditionInput("ticket_category").
+      Input("Body", "ticket_body").Output("BodyOut", "billing_body")
+      // every billing-lane op then reads "billing_body" with no Condition of its own
+
+    RIGHT — each parallel branch vertex gates itself:
+      Vertex("billing_extract").Op("AIExtractMapOp").
+      Condition("lane_is_billing").ConditionInput("ticket_category").
+      Input("Input", "ticket_body").Output("Result", "billing_map").
+
+      Vertex("billing_refund").Op("AIParseNumberOp").
+      Condition("lane_is_billing").ConditionInput("ticket_category").
+      Input("Input", "ticket_body").Output("Result", "billing_refund_amount").
+
+      Vertex("billing_encode").Op("EncodeBillingOp").    // no Condition needed
+      Input("Details", "billing_map").
+      Input("RefundAmount", "billing_refund_amount").    // skipped because producer was skipped
+      Output("Result", "billing_json").
+
+    Then all per-lane encoder outputs converge at a single CoalesceN*Op (one wire per lane → final).
+    The downstream encoder ("billing_encode") needs NO Condition — it's pruned automatically when
+    its inputs come from skipped vertices.
+
 # CUSTOM AI COMPUTE OPS — DEFINING NEW AICOMPUTEOP VARIANTS:
   AIComputeOp[In, Out] is a generic base type. It CANNOT be registered or used in the graph directly.
   You must embed it in a named concrete struct and register that struct.

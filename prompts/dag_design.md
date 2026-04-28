@@ -32,6 +32,32 @@ Canonical AI-appropriate examples:
 5. Any operation whose correct output is the same for a given input every time.
 6. Any branching or routing based on known categories — use predicates and conditions.
 
+# BRANCHING WITH MULTIPLE OPS PER LANE
+When one classification step (a ModeSelectOp output, a comparison result, etc.) routes to MULTIPLE
+parallel ops in the same lane — e.g. a "billing" classification triggers an extract op, a parse op,
+and an encoder, all running in parallel off the same raw input — every parallel op in that lane is
+gated INDEPENDENTLY: same predicate name, same ConditionInput wire, declared on each branch vertex.
+
+Skip-propagation then prunes every downstream vertex that depends on a skipped producer (so the
+lane's encoder needs no Condition of its own — it's pruned automatically when its inputs are nil).
+
+Do NOT design a per-lane "gate", "passthrough", or "router" vertex that fans the input out to its
+siblings. That extra vertex carries no compute, adds a wire layer, and just hides the routing.
+
+WRONG (in the design):
+  classify → gate_billing (Condition: lane_is_billing) → billing_body
+                                                          ├─► billing_extract
+                                                          ├─► billing_refund
+                                                          └─► billing_encode
+
+RIGHT (in the design):
+  classify ──► billing_extract  (Condition: lane_is_billing, ConditionInput: ticket_category)
+           ├─► billing_refund   (Condition: lane_is_billing, ConditionInput: ticket_category)
+           └─► billing_encode   (no Condition; pruned when its inputs are skipped)
+              └► billing_json
+  …same shape for bug, feature, other lanes…
+  CoalesceN*Op (n=4, MergeCoalesce): {billing_json, bug_json, feature_json, other_json} → final
+
 # MANDATORY EXCEPTION — MULTI-TOKEN NATURAL LANGUAGE PARSING:
 Any input that consists of multi-word (multi-token) natural language — phrases, sentences, or free-form
 text where meaning depends on the combination and order of words — MUST be handled by an AI op.

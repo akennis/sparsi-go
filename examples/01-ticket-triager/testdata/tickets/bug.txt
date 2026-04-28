@@ -1,0 +1,10 @@
+Subject: App crashes on every upload
+
+The Android app (v3.7.1, Pixel 7) crashes consistently when I try to upload a
+PDF over 5MB. To reproduce:
+  1. Open the app and sign in.
+  2. Tap the + button on the home screen.
+  3. Choose "Upload PDF" and pick any PDF larger than 5MB.
+  4. Tap "Send".
+The app freezes for ~3 seconds, then closes with no error message. This is
+blocking my entire team from submitting weekly reports — please prioritize.

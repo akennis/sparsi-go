@@ -185,6 +185,11 @@ Numeric casts:
 - `FloatToIntOp` (Input `Value *float64`, Param `mode` ∈ `{"trunc","round","floor","ceil"}`
   default `"trunc"` → `Result int`).
 
+> **Cross-ref:** `examples/02-recipe-analyzer/main.go` currently inlines a
+> private `IntToFloatOp` because `SliceLenOp` returns `*int` while
+> `MulOp`/`AddOp` consume `*float64`. When this group lands, drop the inline
+> op from that example and wire the library op instead.
+
 **Style:** all scalar — tag-based. Add `//go:generate` lines to
 `library/gen.go`. Each op needs a description constant.
 
@@ -553,7 +558,118 @@ group **after** at least Groups 1–4 are in.
    a registry). If the new ops aren't auto-discovered, add the missing
    wiring; do not duplicate descriptions by hand.
 
+5. **Fix the silent `CoalesceStringOp` (and siblings) name clash + harden
+   `RegisterOp` against silent duplicates.**
+
+   **Symptom.** Building a graph that uses `CoalesceStringOp` with four
+   inputs (A, B, C, D) — exactly as documented in
+   `library/coalesce_op.go:108-130` — fails at runtime with
+   `set input field D error: CoalesceOp: unknown field "D"`. The same
+   applies to `CoalesceFloat64Op`, `CoalesceIntOp`, `CoalesceBoolOp`.
+
+   **Root cause.** Two implementations are registered under each of those
+   four names:
+   - `dagor/operator/builtin/coalesce_op.go:36-95` — generic
+     `CoalesceOp[T]` with **2 inputs (A, B)**, registered for
+     string/int/float64/bool.
+   - `library/coalesce_op.go:20-87` — generic `CoalesceOp[T]` with
+     **4 inputs (A, B, C, D)**, registered for the same four types.
+
+   `operator.RegisterOp` (see
+   `dagor/operator/registry.go:34`) returns
+   `"operator pool already registered for name: …"` on duplicate names, but
+   every call site in the repo (`library/coalesce_op.go:132-137`,
+   `library/*.go` `init()` blocks) discards the return value. Because
+   `library` transitively imports `dagor/operator/builtin`, Go runs the
+   builtin's `init()` first; the library's 4-input registration loses the
+   race silently, leaving the 2-input variant resolved by name. The
+   library's `Coalesce*Op` types are dead at runtime — the description
+   constants the LLM sees do **not** match the dispatched op.
+
+   This was uncovered while wiring `examples/01-ticket-triager`
+   (`final` vertex). The example was changed to use `CoalesceNStringOp`
+   from the dagor builtin (variable-arity) as a workaround; revisit that
+   workaround once this item lands.
+
+   **Fix.** Pick **one** of the following. (a) is recommended.
+
+   (a) **Delete `library/coalesce_op.go` outright.** The dagor builtin
+       already ships a 2-input `Coalesce<T>Op` (A/B) and an N-input
+       `CoalesceN<T>Op` (`Input0…Input(n-1)`, configured via `params.n`)
+       for the same four element types. The library variant adds nothing
+       except a hard-coded arity of 4. Plan:
+       - Remove `library/coalesce_op.go` and `library/coalesce_op_test.go`.
+       - Remove the `CoalesceStringOpDescription` /
+         `CoalesceFloat64OpDescription` / `CoalesceIntOpDescription` /
+         `CoalesceBoolOpDescription` constants and ensure
+         `LibraryScanOp.Run` (`driver_ops.go`) instead surfaces the
+         dagor-builtin descriptions (write fresh ones if the builtins
+         don't expose them; see Group 13 item 4 for the discovery
+         mechanism). Cover both 2-input and N-input variants in the LLM
+         prompt with concrete examples for `n=3` and `n=4`.
+       - Update `llm-hints.md` (which already names `CoalesceIntOp`) and
+         the README's library-table row for `CoalesceStringOp` to point at
+         the builtin.
+       - Update the workaround in
+         `examples/01-ticket-triager/main.go` only if (a) changes the
+         recommended op name; otherwise leave it on `CoalesceNStringOp`.
+
+   (b) **Rename the library variants** (e.g. `Coalesce4StringOp`,
+       `Coalesce4Float64Op`, …) so both arities coexist. Less appealing
+       — the N-input builtin already covers `n=4`.
+
+   (c) **Move the library variants into the dagor builtin** as the
+       canonical 4-input form, remove the 2-input form from the builtin,
+       and update every existing call site. Highest blast radius — only
+       do this if you control both repos and want to canonicalize on
+       4-input semantics.
+
+   **Guardrails — required regardless of which fix is chosen.**
+
+   - **Promote duplicate registration from a silent error to a hard
+     failure.** Pick the least-invasive of:
+     - Change `operator.RegisterOp` (and `RegisterOpFactory`) in
+       `dagor/operator/registry.go` to `panic` on duplicate names. The
+       error path is structural, not recoverable; every existing caller
+       already discards the error so behavior changes only for buggy
+       code.
+     - Or, less invasive: introduce `operator.MustRegisterOp[T]()` that
+       wraps the existing function and panics on error, then migrate
+       every `init()` in `library/`, `examples/*/main.go`, and the
+       driver to call it. Leave `RegisterOp` as the error-returning form
+       for callers that genuinely want to recover.
+     Either change must come with a unit test in
+     `dagor/operator/registry_test.go` that registers the same name
+     twice and asserts the panic / error chain.
+   - **Add a duplicate-registration audit test** in
+     `library/registry_audit_test.go` that imports `library` and
+     `dagor/operator/builtin` (matching how the example binaries import
+     them), enumerates every name registered by both, and fails with a
+     readable diff on overlap. This catches future silent shadows.
+   - **Add a registry round-trip test for every Coalesce variant.** For
+     each of `CoalesceStringOp`, `CoalesceFloat64Op`, `CoalesceIntOp`,
+     `CoalesceBoolOp` (and their `N`-input siblings if (a) is chosen),
+     fetch the op from the registry by name, call `InputFields()`, and
+     assert the exact field-name set (`{A,B}` for 2-input,
+     `{Input0…Input(n-1)}` for N-input, `{A,B,C,D}` only if (b) is
+     chosen). This is the test that would have caught the original bug.
+   - **Sweep all `init()` blocks in `library/`, `example/`,
+     `examples/`, and `driver_ops.go` and stop discarding
+     `RegisterOp`'s return value** — switch them to the panic-on-error
+     helper from the first guardrail. Run `grep -rn "operator.RegisterOp" .`
+     to enumerate; the count today is in the dozens.
+   - **Re-run `examples/01-ticket-triager`** end-to-end against all four
+     fixtures (`billing`, `bug`, `feature`, `other`) after the change;
+     each lane must still gate, fire its own AI ops, and produce a
+     non-empty `final_brief`. Capture stdout JSON in
+     `examples/01-ticket-triager/README.md`'s expected-output snippet so
+     a future regression on the coalesce path is reviewable in diff.
+
 **Verify:** `go build ./... && go test ./...` and run `go run .` against a
 prompt that exercises one of the new ops end-to-end (e.g. a simple
 `"compute (a + b) * c, then format with 2 decimals"` workflow that should
-now wire `AddOp → MulOp → FormatFloatOp` with no AI fallback).
+now wire `AddOp → MulOp → FormatFloatOp` with no AI fallback). Also re-run
+`go run ./examples/01-ticket-triager --ticket
+examples/01-ticket-triager/testdata/tickets/billing.txt` (and the other
+three fixtures) and confirm the JSON output matches the README's
+expected-output snippet.
