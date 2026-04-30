@@ -1165,6 +1165,248 @@ func TestModeSelectOp_AmbiguousInput(t *testing.T) {
 	t.Logf("op.Result: %q", op.Result)
 }
 
+// ---- Reasoning mode (WithReasoningLog) ----
+
+// assertReasoningEntry checks that a ReasoningEntry has the expected op name,
+// non-empty reasoning, non-nil output, and that every key in wantInputs is
+// present with the correct value.
+func assertReasoningEntry(t *testing.T, e ReasoningEntry, wantOp string, wantInputs map[string]any) {
+	t.Helper()
+	if e.Op != wantOp {
+		t.Errorf("Op: got %q, want %q", e.Op, wantOp)
+	}
+	if e.Reasoning == "" {
+		t.Error("Reasoning is empty")
+	}
+	if e.Output == nil {
+		t.Error("Output is nil")
+	}
+	for k, want := range wantInputs {
+		got, ok := e.Inputs[k]
+		if !ok {
+			t.Errorf("Inputs[%q] missing", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("Inputs[%q]: got %v, want %v", k, got, want)
+		}
+	}
+}
+
+func TestAIScoreOp_ReasoningMode(t *testing.T) {
+	skipIfNoAPIKey(t)
+	op := &AIScoreOp{}
+	if err := op.Setup(mustParams(t, map[string]string{"criterion": "toxicity"})); err != nil {
+		t.Fatal(err)
+	}
+	input := "You are a complete idiot and I hate everything about you."
+	op.Input = &input
+
+	ctx, log := WithReasoningLog(context.Background())
+	if err := op.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	entries := log.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 reasoning entry, got %d", len(entries))
+	}
+	assertReasoningEntry(t, entries[0], "AIScoreOp", map[string]any{
+		"Input":     input,
+		"Criterion": "toxicity",
+	})
+}
+
+func TestAIBoolOp_ReasoningMode(t *testing.T) {
+	skipIfNoAPIKey(t)
+	op := &AIBoolOp{}
+	if err := op.Setup(mustParams(t, map[string]string{
+		"predicate": "does this text mention a programming language?",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	input := "Go is a compiled language designed at Google."
+	op.Input = &input
+
+	ctx, log := WithReasoningLog(context.Background())
+	if err := op.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	entries := log.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 reasoning entry, got %d", len(entries))
+	}
+	assertReasoningEntry(t, entries[0], "AIBoolOp", map[string]any{
+		"Input":     input,
+		"Predicate": "does this text mention a programming language?",
+	})
+}
+
+func TestAIClassifyMultiLabelOp_ReasoningMode(t *testing.T) {
+	skipIfNoAPIKey(t)
+	op := &AIClassifyMultiLabelOp{}
+	if err := op.Setup(mustParams(t, map[string]string{
+		"categories": "billing,bug,feature,spam",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	input := "The app crashes every time I try to upload a photo."
+	op.Input = &input
+
+	ctx, log := WithReasoningLog(context.Background())
+	if err := op.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	entries := log.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 reasoning entry, got %d", len(entries))
+	}
+	assertReasoningEntry(t, entries[0], "AIClassifyMultiLabelOp", map[string]any{
+		"Input": input,
+	})
+}
+
+func TestAIBestMatchOp_ReasoningMode(t *testing.T) {
+	skipIfNoAPIKey(t)
+	op := &AIBestMatchOp{}
+	if err := op.Setup(mustParams(t, map[string]string{})); err != nil {
+		t.Fatal(err)
+	}
+	query := "fastest land animal"
+	candidates := []string{"elephant", "cheetah", "turtle", "sloth"}
+	op.Query = &query
+	op.Candidates = &candidates
+
+	ctx, log := WithReasoningLog(context.Background())
+	if err := op.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	entries := log.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 reasoning entry, got %d", len(entries))
+	}
+	assertReasoningEntry(t, entries[0], "AIBestMatchOp", map[string]any{
+		"Query": query,
+	})
+}
+
+func TestAIRerankOp_ReasoningMode(t *testing.T) {
+	skipIfNoAPIKey(t)
+	op := &AIRerankOp{}
+	if err := op.Setup(mustParams(t, map[string]string{})); err != nil {
+		t.Fatal(err)
+	}
+	query := "machine learning frameworks"
+	candidates := []string{"TensorFlow", "Flask", "NumPy", "PyTorch"}
+	op.Query = &query
+	op.Candidates = &candidates
+
+	ctx, log := WithReasoningLog(context.Background())
+	if err := op.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	entries := log.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 reasoning entry, got %d", len(entries))
+	}
+	assertReasoningEntry(t, entries[0], "AIRerankOp", map[string]any{
+		"Query": query,
+	})
+}
+
+func TestAIComputeOp_ReasoningMode(t *testing.T) {
+	skipIfNoAPIKey(t)
+	op := &AIParseNumberOp{}
+	if err := op.Setup(mustParams(t, map[string]string{})); err != nil {
+		t.Fatal(err)
+	}
+	input := "twenty-three"
+	op.Input = &input
+
+	ctx, log := WithReasoningLog(context.Background())
+	if err := op.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	entries := log.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 reasoning entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Op != "AIComputeOp" {
+		t.Errorf("Op: got %q, want %q", e.Op, "AIComputeOp")
+	}
+	if e.Reasoning == "" {
+		t.Error("Reasoning is empty")
+	}
+	if e.Inputs["Operation"] == nil {
+		t.Error("Inputs[Operation] is missing")
+	}
+	if op.Result != 23 {
+		t.Errorf("result: got %v, want 23", op.Result)
+	}
+}
+
+// TestReasoningLog_MultipleInvocations_SameOpType runs the same op instance
+// twice with different inputs and asserts that both invocations are recorded as
+// separate entries with distinct Inputs snapshots.
+func TestReasoningLog_MultipleInvocations_SameOpType(t *testing.T) {
+	skipIfNoAPIKey(t)
+	op := &AIScoreOp{}
+	if err := op.Setup(mustParams(t, map[string]string{"criterion": "toxicity"})); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, log := WithReasoningLog(context.Background())
+
+	inputs := []string{
+		"You are a complete idiot and I hate everything about you!",
+		"Thank you so much for your kind help today.",
+	}
+	for _, in := range inputs {
+		s := in
+		op.Input = &s
+		if err := op.Run(ctx); err != nil {
+			t.Fatalf("Run(%q): %v", in, err)
+		}
+	}
+
+	entries := log.Entries()
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	in0, _ := entries[0].Inputs["Input"].(string)
+	in1, _ := entries[1].Inputs["Input"].(string)
+	if in0 == in1 {
+		t.Errorf("both entries recorded the same Input %q — invocations not tracked independently", in0)
+	}
+}
+
+// TestReasoningLog_NoEntryWhenDisabled confirms that running an op with a plain
+// context (no WithReasoningLog) records nothing and does not panic.
+func TestReasoningLog_NoEntryWhenDisabled(t *testing.T) {
+	skipIfNoAPIKey(t)
+	op := &AIScoreOp{}
+	if err := op.Setup(mustParams(t, map[string]string{"criterion": "toxicity"})); err != nil {
+		t.Fatal(err)
+	}
+	input := "some text"
+	op.Input = &input
+
+	// Run without a reasoning log in context.
+	if err := op.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// No assertion about a log — just confirming no panic and correct result.
+	if op.Result < 0 || op.Result > 1 {
+		t.Errorf("score %v out of [0,1]", op.Result)
+	}
+}
+
 func TestModeSelectOp_EmptyInput(t *testing.T) {
 	skipIfNoAPIKey(t)
 	op := &ModeSelectOp{}

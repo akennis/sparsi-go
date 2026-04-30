@@ -488,6 +488,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	ctx, reasonLog := library.WithReasoningLog(ctx)
 
 	if err := eng.Run(ctx); err != nil {
 		log.Fatalf("run graph: %v", err)
@@ -540,4 +541,31 @@ func main() {
 	if err := enc.Encode(result); err != nil {
 		log.Fatalf("encode output: %v", err)
 	}
+
+	dumpReasoning(reasonLog.Entries())
+}
+
+// dumpReasoning prints reasoning entries to stderr after the primary JSON
+// output.  Input values longer than 120 characters are truncated for
+// readability.
+func dumpReasoning(entries []library.ReasoningEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "\n─── AI Reasoning ────────────────────────────────────────────────────────────")
+	for i, e := range entries {
+		fmt.Fprintf(os.Stderr, "[%d] %s\n", i+1, e.Op)
+		for k, v := range e.Inputs {
+			s := strings.ReplaceAll(fmt.Sprintf("%v", v), "\n", " ")
+			if len(s) > 120 {
+				s = s[:117] + "..."
+			}
+			fmt.Fprintf(os.Stderr, "    %-12s %s\n", k+":", s)
+		}
+		fmt.Fprintf(os.Stderr, "    → %s\n", e.Reasoning)
+		if i < len(entries)-1 {
+			fmt.Fprintln(os.Stderr)
+		}
+	}
+	fmt.Fprintln(os.Stderr, "─────────────────────────────────────────────────────────────────────────────")
 }

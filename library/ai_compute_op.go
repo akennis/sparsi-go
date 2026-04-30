@@ -97,8 +97,7 @@ func (op *AIComputeOp[In, Out]) InputFields() map[string]any {
 
 func (op *AIComputeOp[In, Out]) OutputFields() map[string]any {
 	return map[string]any{
-		"Result":    &op.Result,
-		"Reasoning": &op.Reasoning,
+		"Result": &op.Result,
 	}
 }
 
@@ -127,6 +126,7 @@ func (op *AIComputeOp[In, Out]) ResetFields() {
 func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 	slog.DebugContext(ctx, "AIComputeOp.run", "run_id", dagor.RunID(ctx), "operation", op.operation)
 
+	isReasoning := logFromCtx(ctx) != nil
 	apiKey := os.Getenv("CLAUDE_API_KEY")
 	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
@@ -161,6 +161,13 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 		"{{FORMAT}}", formatDesc,
 	).Replace(aiComputeBaseTemplate)
 
+	var systemText string
+	if isReasoning {
+		systemText = `Respond with a JSON object {"result": <your answer in the format described>, "reasoning": "<brief explanation>"}. No markdown, no other text.`
+	} else {
+		systemText = "Respond only with the requested format. Do not include any explanation or markdown formatting."
+	}
+
 	var prevResponse, prevErr string
 	for attempt := 0; attempt <= op.maxRetries; attempt++ {
 		prompt := basePrompt
@@ -175,7 +182,7 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 			Model:     anthropic.ModelClaudeSonnet4_6,
 			MaxTokens: 16 * 1024,
 			System: []anthropic.TextBlockParam{
-				{Text: "Respond only with the requested format. Do not include any explanation or markdown formatting."},
+				{Text: systemText},
 			},
 			Messages: []anthropic.MessageParam{
 				anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
@@ -192,14 +199,49 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 				raw += block.Text
 			}
 		}
+		raw = strings.TrimSpace(raw)
 
-		if parseErr := op.parseResult(strings.TrimSpace(raw)); parseErr != nil {
+		var resultStr, reasoning string
+		if isReasoning {
+			var envelope struct {
+				Result    json.RawMessage `json:"result"`
+				Reasoning string          `json:"reasoning"`
+			}
+			if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+				prevResponse = raw
+				prevErr = fmt.Sprintf("expected JSON {result, reasoning}, got %q: %v", raw, err)
+				slog.DebugContext(ctx, "AIComputeOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", prevErr)
+				continue
+			}
+			// Unwrap result: JSON string → Go string (handles escaping); otherwise use raw bytes.
+			if len(envelope.Result) > 0 && envelope.Result[0] == '"' {
+				if err := json.Unmarshal(envelope.Result, &resultStr); err != nil {
+					prevResponse = raw
+					prevErr = fmt.Sprintf("could not decode result field %q: %v", string(envelope.Result), err)
+					slog.DebugContext(ctx, "AIComputeOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", prevErr)
+					continue
+				}
+			} else {
+				resultStr = strings.TrimSpace(string(envelope.Result))
+			}
+			reasoning = envelope.Reasoning
+		} else {
+			resultStr = raw
+		}
+
+		if parseErr := op.parseResult(resultStr); parseErr != nil {
 			prevResponse = raw
 			prevErr = parseErr.Error()
 			slog.DebugContext(ctx, "AIComputeOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", parseErr)
 			continue
 		}
 
+		if isReasoning {
+			recordReasoning(ctx, "AIComputeOp", map[string]any{
+				"Operation": op.operation,
+				"Input":     inputDesc,
+			}, op.Result, reasoning)
+		}
 		return nil
 	}
 

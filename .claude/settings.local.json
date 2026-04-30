@@ -22,7 +22,8 @@
       "Bash(curl -s --max-time 30 'https://www.themealdb.com/api/json/v1/1/search.php?s=Chicken%20Curry' -o /mnt/c/Users/albert.kennis/projects/clawdag-go/examples/02-recipe-analyzer/testdata/recipes/chicken-curry.json)",
       "Bash(curl -s \"https://wttr.in/London?format=j1\")",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); cc=d['current_condition'][0]; print\\(json.dumps\\({k: cc[k] for k in ['temp_C','precipMM','windspeedKmph','weatherDesc']}, indent=2\\)\\)\")",
-      "Bash(grep -v \"^.*//.*$\")"
+      "Bash(grep -v \"^.*//.*$\")",
+      "Bash(grep -E \"^d|README|\\\\.go$\")"
     ]
   }
 }

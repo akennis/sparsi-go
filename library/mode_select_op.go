@@ -2,6 +2,7 @@ package library
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,16 +20,14 @@ const ModeSelectOpDescription = `ModeSelectOp: AI-powered classifier — maps ar
   Params:   categories string — comma-separated list of valid output values (e.g. "arithmetic expression,city name").
             max_retries string — parse/validation retries (default "3").
   Inputs:   Input *string — the text to classify.
-  Outputs:  Result string — exactly one of the specified categories.
-            Reasoning string.`
+  Outputs:  Result string — exactly one of the specified categories.`
 
 // ModeSelectOp classifies an arbitrary input string into one of a fixed set of
 // categories using an AI call. Use it at the top of a multi-branch workflow to
 // dispatch to the correct branch based on what the input represents.
 type ModeSelectOp struct {
-	Input     *string `dag:"input"`
-	Result    string  `dag:"output"`
-	Reasoning string  `dag:"output"`
+	Input  *string `dag:"input"`
+	Result string  `dag:"output"`
 
 	categories []string
 	maxRetries int
@@ -62,6 +61,7 @@ func (op *ModeSelectOp) Reset() error { return nil }
 func (op *ModeSelectOp) Run(ctx context.Context) error {
 	slog.DebugContext(ctx, "ModeSelectOp.run", "run_id", dagor.RunID(ctx), "categories", op.categories)
 
+	isReasoning := logFromCtx(ctx) != nil
 	apiKey := os.Getenv("CLAUDE_API_KEY")
 	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
@@ -73,6 +73,13 @@ func (op *ModeSelectOp) Run(ctx context.Context) error {
 		catList, *op.Input,
 	)
 
+	var systemText string
+	if isReasoning {
+		systemText = `Respond with a JSON object {"result": "<category>", "reasoning": "<brief explanation>"}. No markdown, no other text.`
+	} else {
+		systemText = "Respond with only the requested value. No explanation, no punctuation, no formatting."
+	}
+
 	catSet := make(map[string]bool, len(op.categories))
 	for _, c := range op.categories {
 		catSet[c] = true
@@ -81,11 +88,15 @@ func (op *ModeSelectOp) Run(ctx context.Context) error {
 	prompt := basePrompt
 	var lastErr string
 	for attempt := 0; attempt <= op.maxRetries; attempt++ {
+		maxTokens := int64(64)
+		if isReasoning {
+			maxTokens = 512
+		}
 		msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeSonnet4_6,
-			MaxTokens: 64,
+			MaxTokens: maxTokens,
 			System: []anthropic.TextBlockParam{
-				{Text: "Respond with only the requested value. No explanation, no punctuation, no formatting."},
+				{Text: systemText},
 			},
 			Messages: []anthropic.MessageParam{
 				anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
@@ -102,8 +113,26 @@ func (op *ModeSelectOp) Run(ctx context.Context) error {
 				raw += block.Text
 			}
 		}
+		raw = strings.TrimSpace(raw)
 
-		result := strings.TrimSpace(raw)
+		var result, reasoning string
+		if isReasoning {
+			var envelope struct {
+				Result    string `json:"result"`
+				Reasoning string `json:"reasoning"`
+			}
+			if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+				lastErr = fmt.Sprintf("expected JSON {result, reasoning}, got %q: %v", raw, err)
+				prompt = basePrompt + fmt.Sprintf("\n\nPrevious response was invalid JSON — %s.", lastErr)
+				slog.DebugContext(ctx, "ModeSelectOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
+				continue
+			}
+			result = strings.TrimSpace(envelope.Result)
+			reasoning = envelope.Reasoning
+		} else {
+			result = raw
+		}
+
 		if !catSet[result] {
 			lastErr = fmt.Sprintf("result %q is not one of %v", result, op.categories)
 			prompt = basePrompt + fmt.Sprintf("\n\nPrevious result %q was invalid — must be exactly one of: %s.", result, catList)
@@ -111,6 +140,10 @@ func (op *ModeSelectOp) Run(ctx context.Context) error {
 			continue
 		}
 		op.Result = result
+		recordReasoning(ctx, "ModeSelectOp", map[string]any{
+			"Input":      *op.Input,
+			"Categories": op.categories,
+		}, op.Result, reasoning)
 		return nil
 	}
 	return fmt.Errorf("ModeSelectOp: all %d attempts failed; last error: %s", op.maxRetries+1, lastErr)

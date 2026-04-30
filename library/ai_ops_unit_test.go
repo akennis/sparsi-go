@@ -300,14 +300,10 @@ func TestResetFields(t *testing.T) {
 		s := "x"
 		op.Input = &s
 		op.Result = "foo"
-		op.Reasoning = "bar"
 		op.ResetFields()
 		assertNilPtr(t, "Input", op.Input)
 		if op.Result != "" {
 			t.Errorf("expected Result to be \"\", got %q", op.Result)
-		}
-		if op.Reasoning != "" {
-			t.Errorf("expected Reasoning to be \"\", got %q", op.Reasoning)
 		}
 	})
 
@@ -413,6 +409,26 @@ func TestResetFields(t *testing.T) {
 			t.Errorf("expected Reasoning to be \"\", got %q", op.Reasoning)
 		}
 	})
+}
+
+// TestOutputFields_NoReasoningWire verifies that no AI op exposes "Reasoning"
+// as an output wire. This guards against accidentally re-adding it, which would
+// silently break reasoning-mode callers who read from the ReasoningLog instead.
+func TestOutputFields_NoReasoningWire(t *testing.T) {
+	check := func(t *testing.T, fields map[string]any) {
+		t.Helper()
+		if _, ok := fields["Reasoning"]; ok {
+			t.Error("OutputFields() must not contain 'Reasoning'")
+		}
+	}
+
+	t.Run("AIClassifyMultiLabelOp", func(t *testing.T) { check(t, (&AIClassifyMultiLabelOp{}).OutputFields()) })
+	t.Run("AIScoreOp", func(t *testing.T) { check(t, (&AIScoreOp{}).OutputFields()) })
+	t.Run("AIBoolOp", func(t *testing.T) { check(t, (&AIBoolOp{}).OutputFields()) })
+	t.Run("AIBestMatchOp", func(t *testing.T) { check(t, (&AIBestMatchOp{}).OutputFields()) })
+	t.Run("AIRerankOp", func(t *testing.T) { check(t, (&AIRerankOp{}).OutputFields()) })
+	t.Run("AIComputeOp", func(t *testing.T) { check(t, (&AIParseNumberOp{}).OutputFields()) })
+	t.Run("ModeSelectOp", func(t *testing.T) { check(t, (&ModeSelectOp{}).OutputFields()) })
 }
 
 // TestAIComputeOp_parseResult_Float64 drives the unexported parseResult method

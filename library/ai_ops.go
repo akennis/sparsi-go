@@ -2,6 +2,7 @@ package library
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -113,7 +114,7 @@ func (op *AIClassifyMultiLabelOp) InputFields() map[string]any {
 }
 
 func (op *AIClassifyMultiLabelOp) OutputFields() map[string]any {
-	return map[string]any{"Result": &op.Result, "Reasoning": &op.Reasoning}
+	return map[string]any{"Result": &op.Result}
 }
 
 func (op *AIClassifyMultiLabelOp) SetInputField(field string, value any) error {
@@ -139,15 +140,29 @@ func (op *AIClassifyMultiLabelOp) ResetFields() {
 func (op *AIClassifyMultiLabelOp) Run(ctx context.Context) error {
 	slog.DebugContext(ctx, "AIClassifyMultiLabelOp.run", "run_id", dagor.RunID(ctx), "categories", op.categories)
 
+	isReasoning := logFromCtx(ctx) != nil
 	client := anthropic.NewClient(option.WithAPIKey(os.Getenv("CLAUDE_API_KEY")))
 	catList := strings.Join(op.categories, ", ")
 
-	basePrompt := fmt.Sprintf(
-		"Classify the following input into zero or more of these categories: %s.\n"+
-			"Respond with matching categories as a comma-separated list. If none match, respond with an empty line.\n"+
-			"Input: %s",
-		catList, *op.Input,
-	)
+	var basePrompt string
+	var systemText string
+	if isReasoning {
+		basePrompt = fmt.Sprintf(
+			"Classify the following input into zero or more of these categories: %s.\n"+
+				`Respond with a JSON object {"labels": "<comma-separated matching categories or empty string>", "reasoning": "<brief explanation>"}.`+"\n"+
+				"Input: %s",
+			catList, *op.Input,
+		)
+		systemText = `Respond with only a JSON object {"labels": "<CSV or empty>", "reasoning": "<explanation>"}. No other text.`
+	} else {
+		basePrompt = fmt.Sprintf(
+			"Classify the following input into zero or more of these categories: %s.\n"+
+				"Respond with matching categories as a comma-separated list. If none match, respond with an empty line.\n"+
+				"Input: %s",
+			catList, *op.Input,
+		)
+		systemText = "Respond with only the requested value. No explanation, no punctuation beyond commas, no formatting."
+	}
 
 	prompt := basePrompt
 	var lastErr string
@@ -156,7 +171,7 @@ func (op *AIClassifyMultiLabelOp) Run(ctx context.Context) error {
 			Model:     anthropic.ModelClaudeSonnet4_6,
 			MaxTokens: 256,
 			System: []anthropic.TextBlockParam{
-				{Text: "Respond with only the requested value. No explanation, no punctuation beyond commas, no formatting."},
+				{Text: systemText},
 			},
 			Messages: []anthropic.MessageParam{
 				anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
@@ -175,9 +190,27 @@ func (op *AIClassifyMultiLabelOp) Run(ctx context.Context) error {
 		}
 		raw = strings.TrimSpace(raw)
 
+		var labelsCSV, reasoning string
+		if isReasoning {
+			var envelope struct {
+				Labels    string `json:"labels"`
+				Reasoning string `json:"reasoning"`
+			}
+			if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+				lastErr = fmt.Sprintf("expected JSON {labels, reasoning}, got %q: %v", raw, err)
+				prompt = basePrompt + fmt.Sprintf("\n\nPrevious response was not valid JSON. Respond with only: {\"labels\": \"<CSV>\", \"reasoning\": \"<string>\"}.")
+				slog.DebugContext(ctx, "AIClassifyMultiLabelOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
+				continue
+			}
+			labelsCSV = envelope.Labels
+			reasoning = envelope.Reasoning
+		} else {
+			labelsCSV = raw
+		}
+
 		var labels []string
-		if raw != "" {
-			for _, item := range strings.Split(raw, ",") {
+		if labelsCSV != "" {
+			for _, item := range strings.Split(labelsCSV, ",") {
 				item = strings.TrimSpace(item)
 				if item != "" {
 					labels = append(labels, item)
@@ -200,6 +233,12 @@ func (op *AIClassifyMultiLabelOp) Run(ctx context.Context) error {
 		}
 
 		op.Result = labels
+		if isReasoning {
+			recordReasoning(ctx, "AIClassifyMultiLabelOp", map[string]any{
+				"Input":      *op.Input,
+				"Categories": op.categories,
+			}, op.Result, reasoning)
+		}
 		return nil
 	}
 	return fmt.Errorf("AIClassifyMultiLabelOp: all %d attempts failed; last error: %s", op.maxRetries+1, lastErr)
@@ -242,7 +281,7 @@ func (op *AIScoreOp) InputFields() map[string]any {
 }
 
 func (op *AIScoreOp) OutputFields() map[string]any {
-	return map[string]any{"Result": &op.Result, "Reasoning": &op.Reasoning}
+	return map[string]any{"Result": &op.Result}
 }
 
 func (op *AIScoreOp) SetInputField(field string, value any) error {
@@ -268,23 +307,40 @@ func (op *AIScoreOp) ResetFields() {
 func (op *AIScoreOp) Run(ctx context.Context) error {
 	slog.DebugContext(ctx, "AIScoreOp.run", "run_id", dagor.RunID(ctx), "criterion", op.criterion)
 
+	isReasoning := logFromCtx(ctx) != nil
 	client := anthropic.NewClient(option.WithAPIKey(os.Getenv("CLAUDE_API_KEY")))
 
-	basePrompt := fmt.Sprintf(
-		"Score the following text for %s on a scale from 0.0 to 1.0.\n"+
-			"Respond with only the numeric score. No explanation.\n"+
-			"Text: %s",
-		op.criterion, *op.Input,
-	)
+	var basePrompt, systemText string
+	if isReasoning {
+		basePrompt = fmt.Sprintf(
+			"Score the following text for %s on a scale from 0.0 to 1.0.\n"+
+				`Respond with a JSON object: {"score": <float 0.0–1.0>, "reasoning": "<brief explanation>"}.`+"\n"+
+				"Text: %s",
+			op.criterion, *op.Input,
+		)
+		systemText = `Respond with only a JSON object: {"score": <decimal 0.0–1.0>, "reasoning": "<brief explanation>"}. No other text.`
+	} else {
+		basePrompt = fmt.Sprintf(
+			"Score the following text for %s on a scale from 0.0 to 1.0.\n"+
+				"Respond with only the numeric score. No explanation.\n"+
+				"Text: %s",
+			op.criterion, *op.Input,
+		)
+		systemText = "Respond with only a decimal number between 0.0 and 1.0. No other text."
+	}
 
 	prompt := basePrompt
 	var lastErr string
 	for attempt := 0; attempt <= op.maxRetries; attempt++ {
+		maxTokens := int64(16)
+		if isReasoning {
+			maxTokens = 256
+		}
 		msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeSonnet4_6,
-			MaxTokens: 16,
+			MaxTokens: maxTokens,
 			System: []anthropic.TextBlockParam{
-				{Text: "Respond with only a decimal number between 0.0 and 1.0. No other text."},
+				{Text: systemText},
 			},
 			Messages: []anthropic.MessageParam{
 				anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
@@ -303,6 +359,31 @@ func (op *AIScoreOp) Run(ctx context.Context) error {
 		}
 		raw = strings.TrimSpace(raw)
 
+		if isReasoning {
+			var parsed struct {
+				Score     float64 `json:"score"`
+				Reasoning string  `json:"reasoning"`
+			}
+			if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+				lastErr = fmt.Sprintf("expected JSON {score, reasoning}, got %q: %v", raw, err)
+				prompt = basePrompt + "\n\nPrevious response was not valid JSON. Respond with only: {\"score\": <float>, \"reasoning\": \"<string>\"}."
+				slog.DebugContext(ctx, "AIScoreOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
+				continue
+			}
+			if parsed.Score < 0 || parsed.Score > 1 {
+				lastErr = fmt.Sprintf("score %v out of [0,1]", parsed.Score)
+				prompt = basePrompt + fmt.Sprintf("\n\nPrevious score %v was out of range. The score field must be between 0.0 and 1.0.", parsed.Score)
+				slog.DebugContext(ctx, "AIScoreOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
+				continue
+			}
+			op.Result = parsed.Score
+			recordReasoning(ctx, "AIScoreOp", map[string]any{
+				"Input":     *op.Input,
+				"Criterion": op.criterion,
+			}, op.Result, parsed.Reasoning)
+			return nil
+		}
+
 		score, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
 			lastErr = fmt.Sprintf("expected float64, got %q: %v", raw, err)
@@ -316,7 +397,6 @@ func (op *AIScoreOp) Run(ctx context.Context) error {
 			slog.DebugContext(ctx, "AIScoreOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
 			continue
 		}
-
 		op.Result = score
 		return nil
 	}
@@ -360,7 +440,7 @@ func (op *AIBoolOp) InputFields() map[string]any {
 }
 
 func (op *AIBoolOp) OutputFields() map[string]any {
-	return map[string]any{"Result": &op.Result, "Reasoning": &op.Reasoning}
+	return map[string]any{"Result": &op.Result}
 }
 
 func (op *AIBoolOp) SetInputField(field string, value any) error {
@@ -386,22 +466,39 @@ func (op *AIBoolOp) ResetFields() {
 func (op *AIBoolOp) Run(ctx context.Context) error {
 	slog.DebugContext(ctx, "AIBoolOp.run", "run_id", dagor.RunID(ctx), "predicate", op.predicate)
 
+	isReasoning := logFromCtx(ctx) != nil
 	client := anthropic.NewClient(option.WithAPIKey(os.Getenv("CLAUDE_API_KEY")))
 
-	basePrompt := fmt.Sprintf(
-		"Answer the following question about the text with only 'true' or 'false'.\n"+
-			"Question: %s\nText: %s",
-		op.predicate, *op.Input,
-	)
+	var basePrompt, systemText string
+	if isReasoning {
+		basePrompt = fmt.Sprintf(
+			"Answer the following question about the text.\n"+
+				`Respond with a JSON object: {"result": <true or false>, "reasoning": "<brief explanation>"}.`+"\n"+
+				"Question: %s\nText: %s",
+			op.predicate, *op.Input,
+		)
+		systemText = `Respond with only a JSON object: {"result": <true|false>, "reasoning": "<explanation>"}. No other text.`
+	} else {
+		basePrompt = fmt.Sprintf(
+			"Answer the following question about the text with only 'true' or 'false'.\n"+
+				"Question: %s\nText: %s",
+			op.predicate, *op.Input,
+		)
+		systemText = "Respond with only 'true' or 'false'."
+	}
 
 	prompt := basePrompt
 	var lastErr string
 	for attempt := 0; attempt <= op.maxRetries; attempt++ {
+		maxTokens := int64(8)
+		if isReasoning {
+			maxTokens = 256
+		}
 		msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeSonnet4_6,
-			MaxTokens: 8,
+			MaxTokens: maxTokens,
 			System: []anthropic.TextBlockParam{
-				{Text: "Respond with only 'true' or 'false'."},
+				{Text: systemText},
 			},
 			Messages: []anthropic.MessageParam{
 				anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
@@ -418,9 +515,28 @@ func (op *AIBoolOp) Run(ctx context.Context) error {
 				raw += block.Text
 			}
 		}
-		raw = strings.ToLower(strings.TrimSpace(raw))
+		raw = strings.TrimSpace(raw)
 
-		switch raw {
+		if isReasoning {
+			var parsed struct {
+				Result    bool   `json:"result"`
+				Reasoning string `json:"reasoning"`
+			}
+			if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+				lastErr = fmt.Sprintf("expected JSON {result, reasoning}, got %q: %v", raw, err)
+				prompt = basePrompt + "\n\nPrevious response was not valid JSON. Respond with only: {\"result\": <true|false>, \"reasoning\": \"<string>\"}."
+				slog.DebugContext(ctx, "AIBoolOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
+				continue
+			}
+			op.Result = parsed.Result
+			recordReasoning(ctx, "AIBoolOp", map[string]any{
+				"Input":     *op.Input,
+				"Predicate": op.predicate,
+			}, op.Result, parsed.Reasoning)
+			return nil
+		}
+
+		switch strings.ToLower(raw) {
 		case "true":
 			op.Result = true
 			return nil
@@ -468,7 +584,7 @@ func (op *AIBestMatchOp) InputFields() map[string]any {
 }
 
 func (op *AIBestMatchOp) OutputFields() map[string]any {
-	return map[string]any{"Result": &op.Result, "Reasoning": &op.Reasoning}
+	return map[string]any{"Result": &op.Result}
 }
 
 func (op *AIBestMatchOp) SetInputField(field string, value any) error {
@@ -499,13 +615,12 @@ func (op *AIBestMatchOp) ResetFields() {
 }
 
 func (op *AIBestMatchOp) Run(ctx context.Context) error {
-
-
 	n := len(*op.Candidates)
 	if n == 0 {
 		return fmt.Errorf("AIBestMatchOp: candidates list is empty")
 	}
 
+	isReasoning := logFromCtx(ctx) != nil
 	client := anthropic.NewClient(option.WithAPIKey(os.Getenv("CLAUDE_API_KEY")))
 
 	var sb strings.Builder
@@ -513,21 +628,37 @@ func (op *AIBestMatchOp) Run(ctx context.Context) error {
 		sb.WriteString(fmt.Sprintf("%d. %s\n", i, c))
 	}
 
-	basePrompt := fmt.Sprintf(
-		"Given the query, return the 0-based index of the best matching candidate.\n"+
-			"Respond with only the integer index. No explanation.\n"+
-			"Query: %s\nCandidates:\n%s",
-		*op.Query, sb.String(),
-	)
+	var basePrompt, systemText string
+	if isReasoning {
+		basePrompt = fmt.Sprintf(
+			"Given the query, return the 0-based index of the best matching candidate.\n"+
+				`Respond with a JSON object: {"index": <integer>, "reasoning": "<brief explanation>"}.`+"\n"+
+				"Query: %s\nCandidates:\n%s",
+			*op.Query, sb.String(),
+		)
+		systemText = `Respond with only a JSON object: {"index": <integer>, "reasoning": "<explanation>"}. No other text.`
+	} else {
+		basePrompt = fmt.Sprintf(
+			"Given the query, return the 0-based index of the best matching candidate.\n"+
+				"Respond with only the integer index. No explanation.\n"+
+				"Query: %s\nCandidates:\n%s",
+			*op.Query, sb.String(),
+		)
+		systemText = "Respond with only an integer index."
+	}
 
 	prompt := basePrompt
 	var lastErr string
 	for attempt := 0; attempt <= op.maxRetries; attempt++ {
+		maxTokens := int64(8)
+		if isReasoning {
+			maxTokens = 256
+		}
 		msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeSonnet4_6,
-			MaxTokens: 8,
+			MaxTokens: maxTokens,
 			System: []anthropic.TextBlockParam{
-				{Text: "Respond with only an integer index."},
+				{Text: systemText},
 			},
 			Messages: []anthropic.MessageParam{
 				anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
@@ -546,7 +677,33 @@ func (op *AIBestMatchOp) Run(ctx context.Context) error {
 		}
 		raw = strings.TrimSpace(raw)
 
-		idx, err := strconv.Atoi(raw)
+		var idx int
+		if isReasoning {
+			var parsed struct {
+				Index     int    `json:"index"`
+				Reasoning string `json:"reasoning"`
+			}
+			if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+				lastErr = fmt.Sprintf("expected JSON {index, reasoning}, got %q: %v", raw, err)
+				prompt = basePrompt + "\n\nPrevious response was not valid JSON. Respond with only: {\"index\": <integer>, \"reasoning\": \"<string>\"}."
+				slog.DebugContext(ctx, "AIBestMatchOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
+				continue
+			}
+			if parsed.Index < 0 || parsed.Index >= n {
+				lastErr = fmt.Sprintf("index %d out of range [0,%d)", parsed.Index, n)
+				prompt = basePrompt + fmt.Sprintf("\n\nIndex %d is out of range. Must be between 0 and %d.", parsed.Index, n-1)
+				slog.DebugContext(ctx, "AIBestMatchOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
+				continue
+			}
+			op.Result = parsed.Index
+			recordReasoning(ctx, "AIBestMatchOp", map[string]any{
+				"Query":      *op.Query,
+				"Candidates": *op.Candidates,
+			}, op.Result, parsed.Reasoning)
+			return nil
+		}
+
+		idx, err = strconv.Atoi(raw)
 		if err != nil {
 			lastErr = fmt.Sprintf("expected integer index, got %q: %v", raw, err)
 			prompt = basePrompt + fmt.Sprintf("\n\nPrevious response %q was not a valid integer. Respond with only the integer index.", raw)
@@ -559,7 +716,6 @@ func (op *AIBestMatchOp) Run(ctx context.Context) error {
 			slog.DebugContext(ctx, "AIBestMatchOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
 			continue
 		}
-
 		op.Result = idx
 		return nil
 	}
@@ -598,7 +754,7 @@ func (op *AIRerankOp) InputFields() map[string]any {
 }
 
 func (op *AIRerankOp) OutputFields() map[string]any {
-	return map[string]any{"Result": &op.Result, "Reasoning": &op.Reasoning}
+	return map[string]any{"Result": &op.Result}
 }
 
 func (op *AIRerankOp) SetInputField(field string, value any) error {
@@ -629,13 +785,12 @@ func (op *AIRerankOp) ResetFields() {
 }
 
 func (op *AIRerankOp) Run(ctx context.Context) error {
-
-
 	n := len(*op.Candidates)
 	if n == 0 {
 		return fmt.Errorf("AIRerankOp: candidates list is empty")
 	}
 
+	isReasoning := logFromCtx(ctx) != nil
 	client := anthropic.NewClient(option.WithAPIKey(os.Getenv("CLAUDE_API_KEY")))
 
 	var sb strings.Builder
@@ -643,21 +798,71 @@ func (op *AIRerankOp) Run(ctx context.Context) error {
 		sb.WriteString(fmt.Sprintf("%d. %s\n", i, c))
 	}
 
-	basePrompt := fmt.Sprintf(
-		"Rerank the following candidates by relevance to the query, best first.\n"+
-			"Respond with only the 0-based indices as a comma-separated list. No explanation.\n"+
-			"Query: %s\nCandidates:\n%s",
-		*op.Query, sb.String(),
-	)
+	var basePrompt, systemText string
+	if isReasoning {
+		basePrompt = fmt.Sprintf(
+			"Rerank the following candidates by relevance to the query, best first.\n"+
+				`Respond with a JSON object: {"indices": "<comma-separated 0-based indices>", "reasoning": "<brief explanation>"}.`+"\n"+
+				"Query: %s\nCandidates:\n%s",
+			*op.Query, sb.String(),
+		)
+		systemText = `Respond with only a JSON object: {"indices": "<CSV of integers>", "reasoning": "<explanation>"}. No other text.`
+	} else {
+		basePrompt = fmt.Sprintf(
+			"Rerank the following candidates by relevance to the query, best first.\n"+
+				"Respond with only the 0-based indices as a comma-separated list. No explanation.\n"+
+				"Query: %s\nCandidates:\n%s",
+			*op.Query, sb.String(),
+		)
+		systemText = "Respond with only a comma-separated list of integers."
+	}
+
+	parseIndices := func(csv string) ([]int, string) {
+		parts := strings.Split(csv, ",")
+		indices := make([]int, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			idx, err := strconv.Atoi(p)
+			if err != nil {
+				return nil, fmt.Sprintf("expected integer, got %q: %v", p, err)
+			}
+			indices = append(indices, idx)
+		}
+		return indices, ""
+	}
+
+	validateIndices := func(indices []int) string {
+		if len(indices) != n {
+			return fmt.Sprintf("expected %d indices, got %d", n, len(indices))
+		}
+		seen := make(map[int]bool, n)
+		for _, idx := range indices {
+			if idx < 0 || idx >= n {
+				return fmt.Sprintf("index %d out of range [0,%d)", idx, n)
+			}
+			if seen[idx] {
+				return fmt.Sprintf("duplicate index %d", idx)
+			}
+			seen[idx] = true
+		}
+		return ""
+	}
 
 	prompt := basePrompt
 	var lastErr string
 	for attempt := 0; attempt <= op.maxRetries; attempt++ {
+		maxTokens := int64(64)
+		if isReasoning {
+			maxTokens = 512
+		}
 		msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeSonnet4_6,
-			MaxTokens: 64,
+			MaxTokens: maxTokens,
 			System: []anthropic.TextBlockParam{
-				{Text: "Respond with only a comma-separated list of integers."},
+				{Text: systemText},
 			},
 			Messages: []anthropic.MessageParam{
 				anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
@@ -676,55 +881,45 @@ func (op *AIRerankOp) Run(ctx context.Context) error {
 		}
 		raw = strings.TrimSpace(raw)
 
-		parts := strings.Split(raw, ",")
-		indices := make([]int, 0, len(parts))
-		var parseErr string
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" {
+		var indicesCSV, reasoning string
+		if isReasoning {
+			var parsed struct {
+				Indices   string `json:"indices"`
+				Reasoning string `json:"reasoning"`
+			}
+			if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+				lastErr = fmt.Sprintf("expected JSON {indices, reasoning}, got %q: %v", raw, err)
+				prompt = basePrompt + "\n\nPrevious response was not valid JSON. Respond with only: {\"indices\": \"<CSV>\", \"reasoning\": \"<string>\"}."
+				slog.DebugContext(ctx, "AIRerankOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
 				continue
 			}
-			idx, err := strconv.Atoi(p)
-			if err != nil {
-				parseErr = fmt.Sprintf("expected integer, got %q: %v", p, err)
-				break
-			}
-			indices = append(indices, idx)
+			indicesCSV = parsed.Indices
+			reasoning = parsed.Reasoning
+		} else {
+			indicesCSV = raw
 		}
+
+		indices, parseErr := parseIndices(indicesCSV)
 		if parseErr != "" {
 			lastErr = parseErr
 			prompt = basePrompt + fmt.Sprintf("\n\nPrevious response %q was invalid: %s. Respond with comma-separated integers only.", raw, parseErr)
 			slog.DebugContext(ctx, "AIRerankOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
 			continue
 		}
-
-		if len(indices) != n {
-			lastErr = fmt.Sprintf("expected %d indices, got %d", n, len(indices))
-			prompt = basePrompt + fmt.Sprintf("\n\nMust return exactly %d indices (one per candidate).", n)
-			slog.DebugContext(ctx, "AIRerankOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
-			continue
-		}
-		seen := make(map[int]bool, n)
-		var dupErr string
-		for _, idx := range indices {
-			if idx < 0 || idx >= n {
-				dupErr = fmt.Sprintf("index %d out of range [0,%d)", idx, n)
-				break
-			}
-			if seen[idx] {
-				dupErr = fmt.Sprintf("duplicate index %d", idx)
-				break
-			}
-			seen[idx] = true
-		}
-		if dupErr != "" {
-			lastErr = dupErr
-			prompt = basePrompt + fmt.Sprintf("\n\nPrevious response was invalid: %s. Return each index 0-%d exactly once.", dupErr, n-1)
+		if valErr := validateIndices(indices); valErr != "" {
+			lastErr = valErr
+			prompt = basePrompt + fmt.Sprintf("\n\nPrevious response was invalid: %s. Return each index 0-%d exactly once.", valErr, n-1)
 			slog.DebugContext(ctx, "AIRerankOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", lastErr)
 			continue
 		}
 
 		op.Result = indices
+		if isReasoning {
+			recordReasoning(ctx, "AIRerankOp", map[string]any{
+				"Query":      *op.Query,
+				"Candidates": *op.Candidates,
+			}, op.Result, reasoning)
+		}
 		return nil
 	}
 	return fmt.Errorf("AIRerankOp: all %d attempts failed; last error: %s", op.maxRetries+1, lastErr)

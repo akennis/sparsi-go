@@ -13,7 +13,7 @@ func (op *ModeSelectOp) InputFields() map[string]any {
 
 func (op *ModeSelectOp) OutputFields() map[string]any {
 	return map[string]any {
-		"Result": &op.Result,"Reasoning": &op.Reasoning,
+		"Result": &op.Result,
 	}
 }
 
@@ -38,7 +38,5 @@ func (op *ModeSelectOp) ResetFields() {
 	
 	var zeroResult string
 	op.Result = zeroResult
-	var zeroReasoning string
-	op.Reasoning = zeroReasoning
 	
 }
