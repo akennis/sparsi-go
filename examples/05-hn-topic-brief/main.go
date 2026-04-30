@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/akennis/clawdag-go/library"      // registers library ops
+	_ "github.com/akennis/clawdag-go/library"    // registers library ops
 	_ "github.com/wwz16/dagor/operator/builtin" // registers CoalesceNStringOp
 
 	"github.com/panjf2000/ants/v2"
@@ -31,8 +31,13 @@ import (
 	"github.com/wwz16/dagor/config"
 	"github.com/wwz16/dagor/graph"
 	"github.com/wwz16/dagor/operator"
+	builtin "github.com/wwz16/dagor/operator/builtin"
 	"github.com/wwz16/dagor/predicate"
 )
+
+// ─── Context keys ──────────────────────────────────────────────────────────
+
+type responseJSONKey struct{}
 
 // ─── Custom ops ────────────────────────────────────────────────────────────
 
@@ -215,6 +220,13 @@ func (op *DominantCategoryOp) SetInputField(field string, value any) error {
 func (op *DominantCategoryOp) ResetFields() { op.AllLabels = nil; op.Dominant = "" }
 
 func init() {
+	mustReg := func(name string, f func() operator.IOperator) {
+		if err := operator.RegisterOpFactory(name, f); err != nil {
+			log.Fatalf("register %s: %v", name, err)
+		}
+	}
+	mustReg("response_const", builtin.ContextValFactory[string](responseJSONKey{}))
+
 	for _, reg := range []func() error{
 		operator.RegisterOp[ExtractTitlesOp],
 		operator.RegisterOp[FilterAndFlattenOp],
@@ -243,10 +255,10 @@ func registerPredicates() {
 
 // ─── Graph ─────────────────────────────────────────────────────────────────
 
-func buildGraph(responseJSON, query string) (*graph.Graph, error) {
+// buildGraph constructs the DAG. query is embedded in AI op params since it
+// shapes the graph definition (not a per-execution runtime value).
+func buildGraph(query string) (*graph.Graph, error) {
 	b := graph.NewBuilder("hn_topic_brief")
-
-	library.RegisterConst("response_const", responseJSON)
 
 	// ── Stage 1: inject API response and extract titles ───────────────────────
 	b.
@@ -391,7 +403,7 @@ func main() {
 
 	registerPredicates()
 
-	g, err := buildGraph(responseJSON, *query)
+	g, err := buildGraph(*query)
 	if err != nil {
 		log.Fatalf("build graph: %v", err)
 	}
@@ -409,6 +421,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	ctx = context.WithValue(ctx, responseJSONKey{}, responseJSON)
 
 	if err := eng.Run(ctx); err != nil {
 		log.Fatalf("run graph: %v", err)

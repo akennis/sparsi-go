@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/akennis/clawdag-go/library"      // registers library ops
+	_ "github.com/akennis/clawdag-go/library"    // registers library ops
 	_ "github.com/wwz16/dagor/operator/builtin" // registers CoalesceNStringOp
 
 	"github.com/panjf2000/ants/v2"
@@ -28,7 +28,26 @@ import (
 	"github.com/wwz16/dagor/config"
 	"github.com/wwz16/dagor/graph"
 	"github.com/wwz16/dagor/operator"
+	builtin "github.com/wwz16/dagor/operator/builtin"
 	"github.com/wwz16/dagor/predicate"
+)
+
+// ─── Context keys ──────────────────────────────────────────────────────────
+
+type (
+	bodyKey        struct{} // fixture: raw wttr.in JSON
+	urlKey         struct{} // live: wttr.in URL
+	precipThreshKey struct{}
+	windThreshKey  struct{}
+	warningKey     struct{}
+	emptyKey       struct{}
+	tempPathKey    struct{}
+	precipPathKey  struct{}
+	windPathKey    struct{}
+	descPathKey    struct{}
+	coldBandKey    struct{}
+	mildBandKey    struct{}
+	hotBandKey     struct{}
 )
 
 // ─── Custom op ─────────────────────────────────────────────────────────────
@@ -139,6 +158,25 @@ func (op *PackOutfitInputsOp) ResetFields() {
 }
 
 func init() {
+	mustReg := func(name string, f func() operator.IOperator) {
+		if err := operator.RegisterOpFactory(name, f); err != nil {
+			log.Fatalf("register %s: %v", name, err)
+		}
+	}
+	mustReg("body_const",      builtin.ContextValFactory[string](bodyKey{}))
+	mustReg("url_const",       builtin.ContextValFactory[string](urlKey{}))
+	mustReg("precip_thresh",   builtin.ContextValFactory[float64](precipThreshKey{}))
+	mustReg("wind_thresh",     builtin.ContextValFactory[float64](windThreshKey{}))
+	mustReg("warning_const",   builtin.ContextValFactory[string](warningKey{}))
+	mustReg("empty_const",     builtin.ContextValFactory[string](emptyKey{}))
+	mustReg("temp_str_path",   builtin.ContextValFactory[string](tempPathKey{}))
+	mustReg("precip_str_path", builtin.ContextValFactory[string](precipPathKey{}))
+	mustReg("wind_str_path",   builtin.ContextValFactory[string](windPathKey{}))
+	mustReg("desc_str_path",   builtin.ContextValFactory[string](descPathKey{}))
+	mustReg("cold_const",      builtin.ContextValFactory[string](coldBandKey{}))
+	mustReg("mild_const",      builtin.ContextValFactory[string](mildBandKey{}))
+	mustReg("hot_const",       builtin.ContextValFactory[string](hotBandKey{}))
+
 	if err := operator.RegisterOp[PackOutfitInputsOp](); err != nil {
 		log.Fatalf("register PackOutfitInputsOp: %v", err)
 	}
@@ -179,29 +217,15 @@ const (
 	sourceFixture
 )
 
-type buildOpts struct {
-	mode    sourceMode
-	cityArg string // live mode: city to query
-	body    string // fixture mode: JSON already read from disk
-}
-
-func buildGraph(opts buildOpts) (*graph.Graph, error) {
+func buildGraph(mode sourceMode) (*graph.Graph, error) {
 	b := graph.NewBuilder("weather_advisor")
 
-	library.RegisterConst("precip_thresh", 0.1)
-	library.RegisterConst("wind_thresh", 25.0)
-	library.RegisterConst("warning_const", "  ⚠ unusual weather")
-	library.RegisterConst("empty_const", "")
-
 	// Stage 1 — produce a single `body` wire containing the wttr.in j1 JSON.
-	switch opts.mode {
+	switch mode {
 	case sourceFixture:
-		library.RegisterConst("body_const", opts.body)
 		b.Vertex("body_const").Op("body_const").
 			Output("Result", "body")
 	case sourceLive:
-		fullURL := "https://wttr.in/" + url.PathEscape(opts.cityArg) + "?format=j1"
-		library.RegisterConst("url_const", fullURL)
 		b.Vertex("url_const").Op("url_const").
 			Output("Result", "url")
 		b.Vertex("fetch").Op("HTTPGetOp").
@@ -211,19 +235,17 @@ func buildGraph(opts buildOpts) (*graph.Graph, error) {
 	}
 
 	// Stage 2 — extract the four numeric/text fields from JSON (run in parallel).
-	for _, f := range []struct{ path, wire string }{
-		{"current_condition.0.temp_C", "temp_str"},
-		{"current_condition.0.precipMM", "precip_str"},
-		{"current_condition.0.windspeedKmph", "wind_str"},
-		{"current_condition.0.weatherDesc.0.value", "desc_str"},
+	for _, f := range []struct{ opName, wire string }{
+		{"temp_str_path", "temp_str"},
+		{"precip_str_path", "precip_str"},
+		{"wind_str_path", "wind_str"},
+		{"desc_str_path", "desc_str"},
 	} {
-		pathWire := f.wire + "_path"
-		library.RegisterConst(pathWire, f.path)
-		b.Vertex(pathWire).Op(pathWire).
-			Output("Result", pathWire)
+		b.Vertex(f.opName).Op(f.opName).
+			Output("Result", f.opName)
 		b.Vertex("extract_"+f.wire).Op("JSONExtractOp").
 			Input("JSON", "body").
-			Input("Path", pathWire).
+			Input("Path", f.opName).
 			Output("Value", f.wire)
 	}
 
@@ -243,14 +265,13 @@ func buildGraph(opts buildOpts) (*graph.Graph, error) {
 		Input("Input", "wind_str").
 		Output("Result", "wind_kph")
 
-	// Stage 4 — deterministic temperature band via three guarded ConstOps
+	// Stage 4 — deterministic temperature band via three guarded ContextVal ops
 	// and a CoalesceNStringOp merger (exactly one will run per execution).
 	for _, band := range []struct{ name, cond string }{
 		{"cold", "temp_is_cold"},
 		{"mild", "temp_is_mild"},
 		{"hot", "temp_is_hot"},
 	} {
-		library.RegisterConst(band.name+"_const", band.name)
 		b.Vertex(band.name+"_const").Op(band.name+"_const").
 			Condition(band.cond).
 			ConditionInput("temp_c").
@@ -361,7 +382,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	opts := buildOpts{}
+	var mode sourceMode
+	var body, fullURL string
 	cityLabel := *city
 
 	if *fixture != "" {
@@ -369,8 +391,8 @@ func main() {
 		if err != nil {
 			log.Fatalf("read fixture: %v", err)
 		}
-		opts.mode = sourceFixture
-		opts.body = string(raw)
+		mode = sourceFixture
+		body = string(raw)
 		// derive city label from filename
 		base := *fixture
 		if idx := strings.LastIndexAny(base, "/\\"); idx >= 0 {
@@ -378,13 +400,13 @@ func main() {
 		}
 		cityLabel = strings.TrimSuffix(base, ".json")
 	} else {
-		opts.mode = sourceLive
-		opts.cityArg = *city
+		mode = sourceLive
+		fullURL = "https://wttr.in/" + url.PathEscape(*city) + "?format=j1"
 	}
 
 	registerPredicates()
 
-	g, err := buildGraph(opts)
+	g, err := buildGraph(mode)
 	if err != nil {
 		log.Fatalf("build graph: %v", err)
 	}
@@ -402,12 +424,28 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	ctx = context.WithValue(ctx, precipThreshKey{}, 0.1)
+	ctx = context.WithValue(ctx, windThreshKey{}, 25.0)
+	ctx = context.WithValue(ctx, warningKey{}, "  ⚠ unusual weather")
+	ctx = context.WithValue(ctx, emptyKey{}, "")
+	ctx = context.WithValue(ctx, tempPathKey{}, "current_condition.0.temp_C")
+	ctx = context.WithValue(ctx, precipPathKey{}, "current_condition.0.precipMM")
+	ctx = context.WithValue(ctx, windPathKey{}, "current_condition.0.windspeedKmph")
+	ctx = context.WithValue(ctx, descPathKey{}, "current_condition.0.weatherDesc.0.value")
+	ctx = context.WithValue(ctx, coldBandKey{}, "cold")
+	ctx = context.WithValue(ctx, mildBandKey{}, "mild")
+	ctx = context.WithValue(ctx, hotBandKey{}, "hot")
+	if mode == sourceFixture {
+		ctx = context.WithValue(ctx, bodyKey{}, body)
+	} else {
+		ctx = context.WithValue(ctx, urlKey{}, fullURL)
+	}
 
 	if err := eng.Run(ctx); err != nil {
 		log.Fatalf("run graph: %v", err)
 	}
 
-	if opts.mode == sourceLive {
+	if mode == sourceLive {
 		if statusRaw, ok := eng.GetOutput("http_status"); ok {
 			if status, ok2 := statusRaw.(*int); ok2 && status != nil && *status != 200 {
 				log.Fatalf("HTTP fetch returned status %d", *status)

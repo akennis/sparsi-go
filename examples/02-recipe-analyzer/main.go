@@ -19,7 +19,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/akennis/clawdag-go/library"      // registers library ops
+	_ "github.com/akennis/clawdag-go/library"    // registers library ops
 	_ "github.com/wwz16/dagor/operator/builtin" // registers CoalesceNStringOp
 
 	"github.com/panjf2000/ants/v2"
@@ -28,7 +28,19 @@ import (
 	"github.com/wwz16/dagor/config"
 	"github.com/wwz16/dagor/graph"
 	"github.com/wwz16/dagor/operator"
+	builtin "github.com/wwz16/dagor/operator/builtin"
 	"github.com/wwz16/dagor/predicate"
+)
+
+// ─── Context keys ──────────────────────────────────────────────────────────
+
+type (
+	bodyKey             struct{} // fixture: raw API JSON
+	urlKey              struct{} // live: TheMealDB URL
+	pathInstructionsKey struct{}
+	pathMealnameKey     struct{}
+	stepWeightKey       struct{}
+	cookWeightKey       struct{}
 )
 
 // ─── Custom ops ────────────────────────────────────────────────────────────
@@ -60,6 +72,18 @@ func (op *IntToFloatOp) SetInputField(field string, value any) error {
 func (op *IntToFloatOp) ResetFields() { op.Value = nil; op.Result = 0 }
 
 func init() {
+	mustReg := func(name string, f func() operator.IOperator) {
+		if err := operator.RegisterOpFactory(name, f); err != nil {
+			log.Fatalf("register %s: %v", name, err)
+		}
+	}
+	mustReg("body_const",          builtin.ContextValFactory[string](bodyKey{}))
+	mustReg("url_const",           builtin.ContextValFactory[string](urlKey{}))
+	mustReg("path_instructions",   builtin.ContextValFactory[string](pathInstructionsKey{}))
+	mustReg("path_mealname",       builtin.ContextValFactory[string](pathMealnameKey{}))
+	mustReg("step_weight",         builtin.ContextValFactory[float64](stepWeightKey{}))
+	mustReg("cook_weight",         builtin.ContextValFactory[float64](cookWeightKey{}))
+
 	if err := operator.RegisterOp[IntToFloatOp](); err != nil {
 		log.Fatalf("register IntToFloatOp: %v", err)
 	}
@@ -68,8 +92,8 @@ func init() {
 // ─── Predicates ────────────────────────────────────────────────────────────
 
 const (
-	easyMax  = 15.0
-	hardMin  = 30.0
+	easyMax = 15.0
+	hardMin = 30.0
 )
 
 func registerPredicates() {
@@ -108,31 +132,17 @@ const (
 	sourceFixture
 )
 
-type buildOpts struct {
-	mode    sourceMode
-	mealArg string // when live: the meal name to query
-	body    string // when fixture: the JSON bytes already on disk
-}
-
-func buildGraph(opts buildOpts) (*graph.Graph, error) {
+func buildGraph(mode sourceMode) (*graph.Graph, error) {
 	b := graph.NewBuilder("recipe_analyzer")
-
-	library.RegisterConst("path_instructions", "meals.0.strInstructions")
-	library.RegisterConst("path_mealname", "meals.0.strMeal")
-	library.RegisterConst("step_weight", 1.5)
-	library.RegisterConst("cook_weight", 0.1)
 
 	// Stage 1 — produce a single wire `raw_json` containing the API response.
 	var vb *graph.VertexBuilder
-	switch opts.mode {
+	switch mode {
 	case sourceFixture:
-		library.RegisterConst("body_const", opts.body)
 		vb = b.
 			Vertex("body_const").Op("body_const").
 			Output("Result", "raw_json")
 	case sourceLive:
-		fullURL := "https://www.themealdb.com/api/json/v1/1/search.php?s=" + url.QueryEscape(opts.mealArg)
-		library.RegisterConst("url_const", fullURL)
 		vb = b.
 			Vertex("url_const").Op("url_const").
 			Output("Result", "url").
@@ -271,13 +281,13 @@ func buildGraph(opts buildOpts) (*graph.Graph, error) {
 // ─── Driver ────────────────────────────────────────────────────────────────
 
 type result struct {
-	Meal            string  `json:"meal"`
-	IngredientCount int     `json:"ingredient_count"`
-	StepCount       int     `json:"step_count"`
-	CookMinutes     float64 `json:"cook_minutes"`
-	DifficultyScore float64 `json:"difficulty_score"`
-	Difficulty      string  `json:"difficulty"`
-	Advice          string  `json:"advice"`
+	Meal            string   `json:"meal"`
+	IngredientCount int      `json:"ingredient_count"`
+	StepCount       int      `json:"step_count"`
+	CookMinutes     float64  `json:"cook_minutes"`
+	DifficultyScore float64  `json:"difficulty_score"`
+	Difficulty      string   `json:"difficulty"`
+	Advice          string   `json:"advice"`
 	AINodes         []string `json:"ai_nodes"`
 }
 
@@ -298,22 +308,24 @@ func main() {
 		os.Exit(2)
 	}
 
-	opts := buildOpts{}
+	var mode sourceMode
+	var body, fullURL string
+
 	if *fixture != "" {
 		raw, err := os.ReadFile(*fixture)
 		if err != nil {
 			log.Fatalf("read fixture: %v", err)
 		}
-		opts.mode = sourceFixture
-		opts.body = string(raw)
+		mode = sourceFixture
+		body = string(raw)
 	} else {
-		opts.mode = sourceLive
-		opts.mealArg = *meal
+		mode = sourceLive
+		fullURL = "https://www.themealdb.com/api/json/v1/1/search.php?s=" + url.QueryEscape(*meal)
 	}
 
 	registerPredicates()
 
-	g, err := buildGraph(opts)
+	g, err := buildGraph(mode)
 	if err != nil {
 		log.Fatalf("build graph: %v", err)
 	}
@@ -331,6 +343,15 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	ctx = context.WithValue(ctx, pathInstructionsKey{}, "meals.0.strInstructions")
+	ctx = context.WithValue(ctx, pathMealnameKey{}, "meals.0.strMeal")
+	ctx = context.WithValue(ctx, stepWeightKey{}, 1.5)
+	ctx = context.WithValue(ctx, cookWeightKey{}, 0.1)
+	if mode == sourceFixture {
+		ctx = context.WithValue(ctx, bodyKey{}, body)
+	} else {
+		ctx = context.WithValue(ctx, urlKey{}, fullURL)
+	}
 
 	if err := eng.Run(ctx); err != nil {
 		log.Fatalf("run graph: %v", err)
@@ -338,7 +359,7 @@ func main() {
 
 	// Live mode: surface a non-200 HTTP status as a hard failure rather than
 	// silently feeding an error page into the AI extractors.
-	if opts.mode == sourceLive {
+	if mode == sourceLive {
 		if statusRaw, ok := eng.GetOutput("http_status"); ok {
 			if status, ok := statusRaw.(*int); ok && status != nil && *status != 200 {
 				log.Fatalf("HTTP fetch returned status %d", *status)

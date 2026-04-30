@@ -123,17 +123,91 @@ StringConstOp (design) ───────┴──► GenerateOp → go_files
 
 | Op | Kind | Description |
 |----|------|-------------|
-| `ConstOp[T]` (via `RegisterConst`) | deterministic | Emits any Go value as a source wire — see [Injecting values](#injecting-values) |
-| `AddOp` | deterministic | Addition |
-| `SubOp` | deterministic | Subtraction |
-| `DivOp` | deterministic | Division (errors on zero divisor) |
+| `ContextValOp[T]` (via `ContextValFactory`) | deterministic | Reads a typed value from `context.Context` at run time — see [Injecting values](#injecting-values) |
+| `ConstOp[T]` (via `RegisterConst`) | deterministic | Emits a fixed Go value captured at registration — use for truly static constants |
+| **Math** | | |
+| `AddOp` | deterministic | A + B (`float64`) |
+| `SubOp` | deterministic | A − B (`float64`) |
+| `MulOp` | deterministic | A × B (`float64`) |
+| `DivOp` | deterministic | A ÷ B — errors on zero divisor |
+| `RoundOp` | deterministic | Rounds a `float64` to nearest integer |
+| `ClampOp` | deterministic | Clamps Value to [Min, Max] |
+| `SumOp` | deterministic | Sums a `[]float64` slice |
+| `MinOp` | deterministic | Minimum of a `[]float64` slice |
+| `MaxOp` | deterministic | Maximum of a `[]float64` slice |
 | `PackMathOperandsOp` | deterministic | Packs two `float64` inputs into a `MathOperands` struct |
-| `StringLookupOp` | deterministic | Looks up a key in a configurable map; returns `""` on miss |
+| `AIComputeMathOperandsToFloat64Op` | AI | Performs any binary float64 operation (e.g. multiply) via Claude |
+| **Strings** | | |
+| `StringConcatOp` | deterministic | Concatenates two strings |
 | `StringToLowerOp` | deterministic | Lowercases a string |
+| `StringSplitOp` | deterministic | Splits a string by a separator into `[]string` |
+| `StringLookupOp` | deterministic | Looks up a key in a params-configured map; returns `""` on miss |
+| `RegexMatchOp` | deterministic | Reports whether input matches a compiled regex |
+| `RegexExtractOp` | deterministic | Returns first match (or submatch group 1) of a regex |
+| `AIComputeStringToStringOp` | AI | Performs any string→string transformation via Claude |
+| **Booleans** | | |
+| `BoolNotOp` | deterministic | Logical NOT |
+| `BoolAndOp` | deterministic | Logical AND |
+| `BoolOrOp` | deterministic | Logical OR |
+| **Predicates — float64** | | |
+| `IfFloatGtOp` | deterministic | A > B |
+| `IfFloatLtOp` | deterministic | A < B |
+| `IfFloatEqOp` | deterministic | A == B |
+| `IfFloatGeOp` | deterministic | A >= B |
+| `IfFloatLeOp` | deterministic | A <= B |
+| `BetweenFloatOp` | deterministic | Min <= Value <= Max (inclusive) |
+| **Predicates — int** | | |
+| `IfIntGtOp` | deterministic | A > B |
+| `IfIntLtOp` | deterministic | A < B |
+| `IfIntEqOp` | deterministic | A == B |
+| `IfIntGeOp` | deterministic | A >= B |
+| `IfIntLeOp` | deterministic | A <= B |
+| **Predicates — string** | | |
+| `IfStringEqOp` | deterministic | A == B |
+| `IfStringContainsOp` | deterministic | A contains B as a substring |
+| `IfStringHasPrefixOp` | deterministic | A starts with B |
+| `IfStringHasSuffixOp` | deterministic | A ends with B |
+| `IfStringRegexMatchOp` | deterministic | Input matches a compiled regex (param: `pattern`) |
+| `IfEmptyStringOp` | deterministic | Value is nil or empty string |
+| `IfEmptySliceStringOp` | deterministic | `[]string` value is nil or empty |
+| `IfEmptySliceFloat64Op` | deterministic | `[]float64` value is nil or empty |
+| **Routing / select** | | |
+| `SelectStringOp` | deterministic | Ternary: returns IfTrue or IfFalse based on a bool condition |
+| `SelectFloat64Op` | deterministic | Ternary over `float64` |
+| `SelectIntOp` | deterministic | Ternary over `int` |
+| `SelectBoolOp` | deterministic | Ternary over `bool` |
+| `SwitchStringOp` | deterministic | Maps Key through a params-configured cases table; returns a default on miss |
+| `DefaultStringOp` | deterministic | Returns Default when Value is nil or empty; otherwise Value |
+| `DefaultFloat64Op` | deterministic | Returns Default when Value is nil; zero is a valid value |
+| `DefaultIntOp` | deterministic | Returns Default when Value is nil; zero is a valid value |
+| **Slices** | | |
+| `SliceLenOp` | deterministic | Length of a `[]string` |
+| `SliceAtOp` | deterministic | Element at index (param or wire) |
+| `SliceFirstOp` | deterministic | First element |
+| `SliceLastOp` | deterministic | Last element |
+| `SliceContainsOp` | deterministic | Reports whether a `[]string` contains a value |
+| `SliceJoinOp` | deterministic | Joins `[]string` with a separator |
+| `SliceFilterEqOp` | deterministic | Filters `[]string` to elements equal to Value |
+| `SliceTopKOp` | deterministic | Indices of the K highest scores in a `[]float64` |
+| **JSON** | | |
+| `JSONExtractOp` | deterministic | Extracts a value from JSON using a dot-separated path |
+| **I/O** | | |
+| `FileReadOp` | deterministic | Reads a file from disk |
+| `EnvOp` | deterministic | Reads an environment variable |
+| `HTTPGetOp` | deterministic | HTTP GET — returns Body and StatusCode |
+| **Time** | | |
 | `CityTimeOp` | deterministic | Returns the current time for "New York" or "Tokyo" |
-| `AIComputeMathOperandsToFloat64Op` | AI | Performs any binary float64 operation (e.g. multiply) |
-| `AIComputeStringToStringOp` | AI | Performs any string-to-string transformation |
+| **AI ops** | | |
 | `ModeSelectOp` | AI | Classifies input text into one of a fixed set of categories |
+| `AIBoolOp` | AI | Yes/no predicate about input text |
+| `AIScoreOp` | AI | Scores text against a criterion, returns float64 ∈ [0,1] |
+| `AIClassifyMultiLabelOp` | AI | Maps input to zero or more of a fixed set of labels |
+| `AIExtractStringSliceOp` | AI | Extracts a list of strings from free-form text |
+| `AIExtractMapOp` | AI | Extracts key-value pairs from free-form text |
+| `AIParseNumberOp` | AI | Converts free-form text to a `float64` |
+| `AISummarizeOp` | AI | Summarizes a `[]string` into a single result string |
+| `AIBestMatchOp` | AI | Returns the 0-based index of the best-matching candidate for a query |
+| `AIRerankOp` | AI | Returns a permutation of candidate indices, best first |
 
 ### AI Ops
 
@@ -203,26 +277,40 @@ The manifest includes `user_config` entries for any environment variables detect
 
 ### Injecting values
 
-Every wire value in a dagor graph must be produced by an operator — there is no runtime injection API. To feed a Go value into a graph, use `RegisterConst`:
+Every wire value in a dagor graph must be produced by an operator. Use `ContextValOp` from `github.com/wwz16/dagor/operator/builtin` to inject per-execution values via Go's `context.Context`. The graph is built once; each `eng.Run(ctx)` call supplies a different value through the context — the key pattern for request pipelines and servers.
 
 ```go
-library.RegisterConst("my_items", []string{"foo", "bar", "baz"})
-library.RegisterConst("threshold", 0.75)
+import builtin "github.com/wwz16/dagor/operator/builtin"
 
+type itemsKey struct{}
+type thresholdKey struct{}
+
+func init() {
+    operator.RegisterOpFactory("my_items", builtin.ContextValFactory[[]string](itemsKey{}))
+    operator.RegisterOpFactory("threshold", builtin.ContextValFactory[float64](thresholdKey{}))
+}
+
+// Build the graph once at startup:
 g, _ := graph.NewBuilder("my_graph").
     Vertex("items_src").Op("my_items").Output("Result", "items").
     Vertex("threshold_src").Op("threshold").Output("Result", "threshold").
     // ... downstream vertices consume "items" and "threshold" wires
     Build()
+
+// Inject values at run time — a new Engine per call, same graph:
+ctx := context.WithValue(context.Background(), itemsKey{}, []string{"foo", "bar", "baz"})
+ctx = context.WithValue(ctx, thresholdKey{}, 0.75)
+eng, _ := dagor.NewEngine(g, pool)
+eng.Run(ctx)
 ```
 
-`RegisterConst[T]` registers a factory under the given name that emits the captured value on every run. It works for any type `T` — scalars, slices, structs — with no serialization or `Setup` changes required.
+`ContextValFactory[T](key)` returns a factory for `operator.RegisterOpFactory`. The resulting op reads the value from the context key at each `Run` call; it errors if the key is missing or has the wrong type. Context keys must be unexported struct types to avoid collisions.
 
-**Params vs `RegisterConst`**
+**Params vs `ContextValOp`**
 
-Use **params** for static configuration that is part of the op's definition: operation names, map keys, numeric thresholds, flags. Params are JSON-encoded into the graph config and read by the op's `Setup` method, so they only work for JSON-representable types and require the op to explicitly parse them.
+Use **params** for static configuration that is part of the op's definition: operation names, map keys, regex patterns, flags. Params are JSON-encoded into the graph config and read by the op's `Setup` method, so they only work for JSON-representable types and require the op to explicitly parse them.
 
-Use **`RegisterConst`** when you already have a value as a Go variable at graph-build time. It is the right default whenever you need to introduce a value that is not part of an op's fixed configuration — runtime inputs, user-supplied data, slices, or any type that is awkward to serialize.
+Use **`ContextValOp`** for any value that varies per execution: user input, request data, file content, computed URLs, API responses, or any type that is awkward to serialize into JSON. Registering the factory once and injecting via context means the same graph definition serves many executions.
 
 ### Adding a deterministic op
 
@@ -300,11 +388,11 @@ export CLAUDE_API_KEY=<your key>
 go run .
 ```
 
-The `example/` directory demonstrates a self-contained arithmetic workflow: AI parses operator precedence, deterministic library ops (`AddOp`, `SubOp`, `DivOp`) handle what they can, and `AIComputeMathOperandsToFloat64Op` handles multiplication (intentionally absent from the library):
+The `examples/` directory demonstrates a self-contained arithmetic workflow: AI parses operator precedence, deterministic library ops (`AddOp`, `SubOp`, `DivOp`) handle what they can, and `AIComputeMathOperandsToFloat64Op` handles multiplication (intentionally absent from the library):
 
 ```bash
 export CLAUDE_API_KEY=<your key>
-go run ./example/...
+go run ./examples/...
 ```
 
 ## Code Generation
@@ -347,7 +435,7 @@ clawdag-go/
 │   ├── dag_validation_error_context.md
 │   └── mcpb_manifest_ai.md
 ├── library/
-│   ├── const_op.go       — ConstOp[T] + RegisterConst (generic value injection)
+│   ├── const_op.go       — ConstOp[T] + RegisterConst (static constant injection)
 │   ├── math_ops.go       — AddOp, SubOp, DivOp, PackMathOperandsOp
 │   ├── string_ops.go     — StringLookupOp, StringToLowerOp, AIComputeStringToStringOp
 │   ├── time_ops.go       — CityTimeOp
@@ -355,8 +443,8 @@ clawdag-go/
 │   ├── ai_compute_op.go  — generic AIComputeOp[In, Out] base
 │   ├── gen.go            — //go:generate directives for library ops
 │   └── *_gen.go          — generated (do not edit)
-├── example/
-│   └── main.go           — arithmetic demo workflow
+├── examples/
+│   └── ...               — arithmetic demo and other example workflows
 └── CLAUDE.md             — instructions for AI assistants
 ```
 

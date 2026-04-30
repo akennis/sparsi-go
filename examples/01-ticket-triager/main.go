@@ -27,8 +27,13 @@ import (
 	"github.com/wwz16/dagor/config"
 	"github.com/wwz16/dagor/graph"
 	"github.com/wwz16/dagor/operator"
+	builtin "github.com/wwz16/dagor/operator/builtin"
 	"github.com/wwz16/dagor/predicate"
 )
+
+// ─── Context keys ──────────────────────────────────────────────────────────
+
+type ticketBodyKey struct{}
 
 // ─── Custom ops ────────────────────────────────────────────────────────────
 
@@ -300,6 +305,13 @@ func (op *EncodeOtherOp) ResetFields() {
 }
 
 func init() {
+	mustReg := func(name string, f func() operator.IOperator) {
+		if err := operator.RegisterOpFactory(name, f); err != nil {
+			log.Fatalf("register %s: %v", name, err)
+		}
+	}
+	mustReg("body_const", builtin.ContextValFactory[string](ticketBodyKey{}))
+
 	for _, reg := range []func() error{
 		operator.RegisterOp[LaneGateOp],
 		operator.RegisterOp[EncodeBillingOp],
@@ -330,12 +342,10 @@ func registerPredicates() {
 
 // ─── Graph ─────────────────────────────────────────────────────────────────
 
-func buildGraph(ticketBody string) (*graph.Graph, error) {
-	library.RegisterConst("body_const", ticketBody)
-
+func buildGraph() (*graph.Graph, error) {
 	return graph.NewBuilder("ticket_triage").
 
-		// Inject the ticket body as a constant string.
+		// Inject the ticket body from the run context.
 		Vertex("body_const").Op("body_const").
 		Output("Result", "ticket_body").
 
@@ -470,7 +480,7 @@ func main() {
 
 	registerPredicates()
 
-	g, err := buildGraph(ticketBody)
+	g, err := buildGraph()
 	if err != nil {
 		log.Fatalf("build graph: %v", err)
 	}
@@ -489,6 +499,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	ctx, reasonLog := library.WithReasoningLog(ctx)
+	ctx = context.WithValue(ctx, ticketBodyKey{}, ticketBody)
 
 	if err := eng.Run(ctx); err != nil {
 		log.Fatalf("run graph: %v", err)

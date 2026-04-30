@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/akennis/clawdag-go/library"      // registers library ops
+	_ "github.com/akennis/clawdag-go/library"    // registers library ops
 	_ "github.com/wwz16/dagor/operator/builtin" // registers CoalesceNStringOp
 
 	"github.com/panjf2000/ants/v2"
@@ -27,7 +27,20 @@ import (
 	"github.com/wwz16/dagor/config"
 	"github.com/wwz16/dagor/graph"
 	"github.com/wwz16/dagor/operator"
+	builtin "github.com/wwz16/dagor/operator/builtin"
 	"github.com/wwz16/dagor/predicate"
+)
+
+// ─── Context keys ──────────────────────────────────────────────────────────
+
+type (
+	readmeBodyKey  struct{} // fixture: pre-read README text
+	mainURLKey     struct{} // live: raw.githubusercontent.com main-branch URL
+	masterURLKey   struct{} // live: raw.githubusercontent.com master-branch URL
+	const200Key    struct{}
+	const2Key      struct{}
+	warningKey     struct{}
+	emptyKey       struct{}
 )
 
 // ─── Custom ops ────────────────────────────────────────────────────────────
@@ -75,6 +88,19 @@ func (op *StringTruncateOp) SetInputField(field string, value any) error {
 func (op *StringTruncateOp) ResetFields() { op.Input = nil; op.Result = "" }
 
 func init() {
+	mustReg := func(name string, f func() operator.IOperator) {
+		if err := operator.RegisterOpFactory(name, f); err != nil {
+			log.Fatalf("register %s: %v", name, err)
+		}
+	}
+	mustReg("readme_const",      builtin.ContextValFactory[string](readmeBodyKey{}))
+	mustReg("main_url_const",    builtin.ContextValFactory[string](mainURLKey{}))
+	mustReg("master_url_const",  builtin.ContextValFactory[string](masterURLKey{}))
+	mustReg("const_200",         builtin.ContextValFactory[int](const200Key{}))
+	mustReg("const_2",           builtin.ContextValFactory[float64](const2Key{}))
+	mustReg("warning_const",     builtin.ContextValFactory[string](warningKey{}))
+	mustReg("empty_const",       builtin.ContextValFactory[string](emptyKey{}))
+
 	if err := operator.RegisterOp[StringTruncateOp](); err != nil {
 		log.Fatalf("register StringTruncateOp: %v", err)
 	}
@@ -123,34 +149,19 @@ const (
 	sourceFixture
 )
 
-type buildOpts struct {
-	mode      sourceMode
-	mainURL   string // live: raw.githubusercontent.com main-branch URL
-	masterURL string // live: raw.githubusercontent.com master-branch URL
-	body      string // fixture: pre-read README text
-}
-
-func buildGraph(opts buildOpts) (*graph.Graph, error) {
+func buildGraph(mode sourceMode) (*graph.Graph, error) {
 	b := graph.NewBuilder("readme_quality")
-
-	library.RegisterConst("const_200", 200)
-	library.RegisterConst("const_2", 2.0)
-	library.RegisterConst("warning_const", "\n\nWARNING: tests not mentioned")
-	library.RegisterConst("empty_const", "")
 
 	// ── Stage 1: produce `readme_raw` ─────────────────────────────────────────
 	// Fixture mode injects the file contents directly; live mode does two
 	// parallel HTTP fetches and selects whichever returned HTTP 200.
-	switch opts.mode {
+	switch mode {
 	case sourceFixture:
-		library.RegisterConst("readme_const", opts.body)
 		b.
 			Vertex("readme_const").Op("readme_const").
 			Output("Result", "readme_raw")
 
 	case sourceLive:
-		library.RegisterConst("main_url_const", opts.mainURL)
-		library.RegisterConst("master_url_const", opts.masterURL)
 		b.
 			Vertex("main_url_const").Op("main_url_const").
 			Output("Result", "main_url").
@@ -336,7 +347,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	opts := buildOpts{}
+	var mode sourceMode
+	var readmeBody, mainURL, masterURL string
 	displaySlug := *slug
 
 	switch {
@@ -345,19 +357,19 @@ func main() {
 		if err != nil {
 			log.Fatalf("read fixture: %v", err)
 		}
-		opts.mode = sourceFixture
-		opts.body = string(raw)
+		mode = sourceFixture
+		readmeBody = string(raw)
 		displaySlug = *fixture
 
 	default:
-		opts.mode = sourceLive
-		opts.mainURL = "https://raw.githubusercontent.com/" + *slug + "/main/README.md"
-		opts.masterURL = "https://raw.githubusercontent.com/" + *slug + "/master/README.md"
+		mode = sourceLive
+		mainURL = "https://raw.githubusercontent.com/" + *slug + "/main/README.md"
+		masterURL = "https://raw.githubusercontent.com/" + *slug + "/master/README.md"
 	}
 
 	registerPredicates()
 
-	g, err := buildGraph(opts)
+	g, err := buildGraph(mode)
 	if err != nil {
 		log.Fatalf("build graph: %v", err)
 	}
@@ -375,6 +387,16 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	ctx = context.WithValue(ctx, const200Key{}, 200)
+	ctx = context.WithValue(ctx, const2Key{}, 2.0)
+	ctx = context.WithValue(ctx, warningKey{}, "\n\nWARNING: tests not mentioned")
+	ctx = context.WithValue(ctx, emptyKey{}, "")
+	if mode == sourceFixture {
+		ctx = context.WithValue(ctx, readmeBodyKey{}, readmeBody)
+	} else {
+		ctx = context.WithValue(ctx, mainURLKey{}, mainURL)
+		ctx = context.WithValue(ctx, masterURLKey{}, masterURL)
+	}
 
 	if err := eng.Run(ctx); err != nil {
 		log.Fatalf("run graph: %v", err)

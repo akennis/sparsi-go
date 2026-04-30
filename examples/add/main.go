@@ -9,29 +9,29 @@ import (
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/graph"
 	"github.com/wwz16/dagor/operator"
+	builtin "github.com/wwz16/dagor/operator/builtin"
 
-	"github.com/akennis/clawdag-go/library"
+	_ "github.com/akennis/clawdag-go/library"
 )
 
+type aKey struct{}
+type bKey struct{}
+
 func init() {
-	operator.RegisterOp[library.AddOp]()
+	mustReg := func(name string, f func() operator.IOperator) {
+		if err := operator.RegisterOpFactory(name, f); err != nil {
+			log.Fatalf("register %s: %v", name, err)
+		}
+	}
+	mustReg("a_const", builtin.ContextValFactory[float64](aKey{}))
+	mustReg("b_const", builtin.ContextValFactory[float64](bKey{}))
 }
 
-func main() {
-	var a, b float64
-	fmt.Print("a: ")
-	if _, err := fmt.Scan(&a); err != nil {
-		log.Fatalf("read a: %v", err)
-	}
-	fmt.Print("b: ")
-	if _, err := fmt.Scan(&b); err != nil {
-		log.Fatalf("read b: %v", err)
-	}
+var g *graph.Graph
 
-	library.RegisterConst("a_const", a)
-	library.RegisterConst("b_const", b)
-
-	g, err := graph.NewBuilder("add").
+func init() {
+	var err error
+	g, err = graph.NewBuilder("add").
 		Vertex("a_const").Op("a_const").
 		Output("Result", "a").
 
@@ -46,6 +46,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("build graph: %v", err)
 	}
+}
+
+func main() {
+	var a, b float64
+	fmt.Print("a: ")
+	if _, err := fmt.Scan(&a); err != nil {
+		log.Fatalf("read a: %v", err)
+	}
+	fmt.Print("b: ")
+	if _, err := fmt.Scan(&b); err != nil {
+		log.Fatalf("read b: %v", err)
+	}
 
 	pool, err := ants.NewPool(2)
 	if err != nil {
@@ -58,7 +70,10 @@ func main() {
 		log.Fatalf("new engine: %v", err)
 	}
 
-	if err := eng.Run(context.Background()); err != nil {
+	ctx := context.WithValue(context.Background(), aKey{}, a)
+	ctx = context.WithValue(ctx, bKey{}, b)
+
+	if err := eng.Run(ctx); err != nil {
 		log.Fatalf("run: %v", err)
 	}
 
