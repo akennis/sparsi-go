@@ -1,4 +1,3 @@
-//go:generate go run ../tools/genlibdesc/main.go
 //go:generate daggen -type=AddFloatOp     -output=math_addfloat_gen.go
 //go:generate daggen -type=SubFloatOp     -output=math_subfloat_gen.go
 //go:generate daggen -type=DivFloatOp     -output=math_divfloat_gen.go

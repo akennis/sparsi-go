@@ -14,14 +14,14 @@ go run .
 # Manage dependencies
 go mod tidy
 
-# Regenerate driver op boilerplate (after modifying driver op struct tags in driver_ops.go)
+# Regenerate driver op boilerplate AND skills/ distribution (after modifying driver_ops.go or any source in skill-src/, prompts/, or examples/)
 go generate .
 
-# Regenerate library op boilerplate (after modifying library op struct tags in library/math_ops.go)
+# Regenerate library op boilerplate only (after modifying library op struct tags)
 go generate ./library/...
 ```
 
-The `go generate` steps use the `daggen` tool to regenerate `driver_*_gen.go` and `library/math_*_gen.go` files from struct tags. Do not edit generated files manually.
+`go generate .` regenerates `driver_*_gen.go` files via `daggen` and assembles the `skills/` distribution directory via `tools/genskills/main.go`. Do not edit generated files manually. The `skills/` directory is gitignored and must be regenerated before packaging a release.
 
 ## Environment
 
