@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +15,37 @@ import (
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/config"
 )
+
+const MCPCallOpDescription = `MCPCallOp: invoke a single MCP server tool as a DAG step.
+Each Run opens a fresh session, completes the MCP handshake, calls the tool, and tears the
+session down — unless pool_size > 0 opts into the warm-replenish pool (stdio only in v1).
+  Params:   transport       — "stdio" (default) or "http". Selects how the MCP server is reached.
+            stdio params:
+              command         — server executable (e.g. "npx", "uvx", "/abs/path"). Required.
+              args            — comma-separated CLI args. Optional.
+              env             — comma-separated KEY=VALUE pairs. Optional.
+            http params:
+              url             — full endpoint URL (http or https). Required.
+              headers         — comma-separated KEY=VALUE pairs injected into every request
+                                (e.g. "Authorization=Bearer ${TOKEN}"). Optional.
+            tool_name       — MCP tool to invoke. Required.
+            init_timeout_ms — handshake timeout in ms (default "10000").
+            call_timeout_ms — single tool call timeout in ms (default "30000").
+            max_retries     — transient-error retries (default "3").
+            pool_size       — warm-replenish pool target capacity per session-spec key
+                              (default "0", no pool). Only supported for transport="stdio".
+                              Pair with library.ShutdownMCPPool from main() so pre-started
+                              subprocesses drain at exit.
+            pool_prewarm    — when pool_size > 0, fill the pool during Setup (default "true").
+  Inputs:   Input *In       — JSON-marshaled as the tool's "arguments" object. Implement
+                              library.MCPArgsFormatter on *In to control marshaling.
+  Outputs:  Result Out      — default dispatch handles string, float64, int, bool,
+                              []string, []float64, []int, map[string]string, and any
+                              struct decodable via json.Unmarshal (structured content
+                              preferred when the server emits it). Implement
+                              library.MCPResponseParser on *Out to fully control parsing.
+Concrete variants embed library.MCPCallOp[In, Out] in a named struct and register via
+operator.RegisterOp[ConcreteOp]() — never register the generic MCPCallOp directly.`
 
 // MCPArgsFormatter is an optional interface for In types to control how they
 // are marshaled into the MCP tool's "arguments" object. If unimplemented, the
@@ -30,51 +63,67 @@ type MCPResponseParser interface {
 }
 
 // MCPCallOp is a generic operator that wraps a single MCP server tool as a
-// dagor node. Each Run spawns a fresh subprocess, completes the MCP handshake,
-// invokes the tool, and tears down the subprocess.
+// dagor node. By default each Run opens a fresh session, completes the MCP
+// handshake, invokes the tool, and tears the session down. Set pool_size to
+// opt into the warm-replenish pool, which keeps N pre-started sessions ready
+// and moves cold-start off the critical path. Pooling is supported only for
+// transport="stdio" in v1.
 //
 // Vertex params:
 //
+//	transport       — "stdio" (default) or "http". Selects how the MCP server
+//	                  is reached. "stdio" runs a local subprocess; "http" talks
+//	                  to a remote server over the streamable HTTP transport.
+//
+//	stdio (transport="stdio"):
 //	command         — server executable (e.g. "npx", "uvx", "/abs/path"). Required.
 //	args            — comma-separated CLI args passed to the server. Optional.
 //	                  Note: values containing commas are not supported.
 //	env             — comma-separated KEY=VALUE pairs added to the subprocess env. Optional.
 //	                  Note: values containing commas are not supported.
+//
+//	http (transport="http"):
+//	url             — full endpoint URL (http or https scheme). Required.
+//	headers         — comma-separated KEY=VALUE pairs injected into every
+//	                  request (e.g. "Authorization=Bearer ${TOKEN}"). Optional.
+//	                  Note: values containing commas are not supported.
+//
 //	tool_name       — MCP tool to invoke. Required.
 //	init_timeout_ms — handshake timeout in ms (default "10000").
 //	call_timeout_ms — single tool call timeout in ms (default "30000").
 //	max_retries     — transient-error retries (default "3").
+//	pool_size       — warm-replenish pool target capacity per session-spec key
+//	                  (default "0", no pool). Vertices with the same spec
+//	                  share warm slots. Each borrow is a fresh session — the
+//	                  pool never reuses a session for a second logical call.
+//	                  Only supported for transport="stdio" in v1.
+//	pool_prewarm    — when pool_size > 0, fill the pool during Setup (default
+//	                  "true"); set "false" to fill lazily on first borrow.
+//
+// Programs that opt into pooling should defer library.ShutdownMCPPool(ctx)
+// from main() so pre-started subprocesses are drained at exit.
 //
 // Do not register MCPCallOp directly — declare a concrete variant such as
-// MCPFilesystemReadFileOp{ MCPCallOp[FilesystemReadArgs, string] }.
+// type EchoOp struct{ MCPCallOp[EchoArgs, string] } and register that.
 type MCPCallOp[In, Out any] struct {
 	Input  *In
 	Result Out
 
-	command     string
-	args        []string
-	env         []string
+	spec        mcpTransportSpec
 	toolName    string
 	initTimeout time.Duration
 	callTimeout time.Duration
 	maxRetries  int
+	poolSize    int
+	poolPrewarm bool
 }
 
 func (op *MCPCallOp[In, Out]) Setup(params *config.Params) error {
-	op.command = params.GetString("command", "")
-	if op.command == "" {
-		return fmt.Errorf("MCPCallOp: 'command' param is required")
+	spec, err := mcpParseTransportSpec(params, "MCPCallOp")
+	if err != nil {
+		return err
 	}
-	if _, err := exec.LookPath(op.command); err != nil {
-		return fmt.Errorf("MCPCallOp: command %q not found on PATH: %w", op.command, err)
-	}
-	op.args = mcpSplitCSV(params.GetString("args", ""))
-	op.env = nil
-	for _, kv := range mcpSplitCSV(params.GetString("env", "")) {
-		if strings.Contains(kv, "=") {
-			op.env = append(op.env, kv)
-		}
-	}
+	op.spec = spec
 	op.toolName = params.GetString("tool_name", "")
 	if op.toolName == "" {
 		return fmt.Errorf("MCPCallOp: 'tool_name' param is required")
@@ -86,6 +135,14 @@ func (op *MCPCallOp[In, Out]) Setup(params *config.Params) error {
 		if n, err := strconv.Atoi(s); err == nil {
 			op.maxRetries = n
 		}
+	}
+	op.poolSize = mcpParsePoolSize(params)
+	op.poolPrewarm = mcpParsePoolPrewarm(params)
+	if op.poolSize > 0 && op.spec.kind != "stdio" {
+		return fmt.Errorf("MCPCallOp: pool_size > 0 is only supported for transport=\"stdio\" in v1 (got transport=%q)", op.spec.kind)
+	}
+	if op.poolSize > 0 && op.poolPrewarm {
+		mcpPoolPrewarm(op.spec, op.initTimeout, op.poolSize)
 	}
 	return nil
 }
@@ -122,7 +179,7 @@ func (op *MCPCallOp[In, Out]) ResetFields() {
 }
 
 func (op *MCPCallOp[In, Out]) Run(ctx context.Context) error {
-	slog.DebugContext(ctx, "MCPCallOp.run", "run_id", dagor.RunID(ctx), "command", op.command, "tool", op.toolName)
+	slog.DebugContext(ctx, "MCPCallOp.run", "run_id", dagor.RunID(ctx), "transport", op.spec.kind, "target", op.spec.label(), "tool", op.toolName)
 
 	args, err := op.encodeArgs()
 	if err != nil {
@@ -156,7 +213,7 @@ func (op *MCPCallOp[In, Out]) Run(ctx context.Context) error {
 }
 
 func (op *MCPCallOp[In, Out]) runOnce(ctx context.Context, args any) (mcpCallOutcome, error) {
-	sess, err := startMCPSession(ctx, op.command, op.args, op.env, op.initTimeout)
+	sess, err := mcpPoolAcquire(ctx, op.spec, op.initTimeout, op.poolSize)
 	if err != nil {
 		return mcpCallOutcome{}, err
 	}
@@ -319,4 +376,91 @@ func mcpParseDurationMs(p *config.Params, key string, defaultMs int64) time.Dura
 		return time.Duration(defaultMs) * time.Millisecond
 	}
 	return time.Duration(n) * time.Millisecond
+}
+
+// mcpParsePoolSize reads the pool_size param. Returns 0 (no pooling) for
+// missing, malformed, or non-positive values.
+func mcpParsePoolSize(p *config.Params) int {
+	s := p.GetString("pool_size", "")
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// mcpParsePoolPrewarm reads the pool_prewarm param. Defaults to true when the
+// param is unset; only "false"/"0"/"no" (case-insensitive) disable prewarm.
+func mcpParsePoolPrewarm(p *config.Params) bool {
+	s := p.GetString("pool_prewarm", "")
+	if s == "" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "false", "0", "no":
+		return false
+	}
+	return true
+}
+
+// mcpParseTransportSpec reads transport-selection params and validates them
+// for the chosen kind. opName is used as a prefix in error messages so callers
+// (MCPCallOp / MCPScriptOp) get clear, contextual diagnostics.
+func mcpParseTransportSpec(p *config.Params, opName string) (mcpTransportSpec, error) {
+	kind := strings.ToLower(strings.TrimSpace(p.GetString("transport", "")))
+	if kind == "" {
+		kind = "stdio"
+	}
+	switch kind {
+	case "stdio":
+		command := p.GetString("command", "")
+		if command == "" {
+			return mcpTransportSpec{}, fmt.Errorf("%s: 'command' param is required for transport=\"stdio\"", opName)
+		}
+		if _, err := exec.LookPath(command); err != nil {
+			return mcpTransportSpec{}, fmt.Errorf("%s: command %q not found on PATH: %w", opName, command, err)
+		}
+		args := mcpSplitCSV(p.GetString("args", ""))
+		var env []string
+		for _, kv := range mcpSplitCSV(p.GetString("env", "")) {
+			if strings.Contains(kv, "=") {
+				env = append(env, kv)
+			}
+		}
+		return mcpTransportSpec{
+			kind:    "stdio",
+			command: command,
+			args:    args,
+			env:     env,
+		}, nil
+	case "http":
+		raw := p.GetString("url", "")
+		if raw == "" {
+			return mcpTransportSpec{}, fmt.Errorf("%s: 'url' param is required for transport=\"http\"", opName)
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			return mcpTransportSpec{}, fmt.Errorf("%s: invalid url %q: %w", opName, raw, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return mcpTransportSpec{}, fmt.Errorf("%s: url %q must use http or https scheme (got %q)", opName, raw, u.Scheme)
+		}
+		var headers []string
+		for _, kv := range mcpSplitCSV(p.GetString("headers", "")) {
+			if strings.Contains(kv, "=") {
+				headers = append(headers, kv)
+			}
+		}
+		sort.Strings(headers)
+		return mcpTransportSpec{
+			kind:    "http",
+			url:     raw,
+			headers: headers,
+		}, nil
+	default:
+		return mcpTransportSpec{}, fmt.Errorf("%s: unknown transport %q (want \"stdio\" or \"http\")", opName, kind)
+	}
 }

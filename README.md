@@ -148,6 +148,9 @@ Workflows are DAGs built from operators (ops). Each op is a Go struct with `dag:
 | `HTTPGetOp` | deterministic | HTTP GET — returns Body and StatusCode |
 | **Time** | | |
 | `CityTimeOp` | deterministic | Returns the current time for "New York" or "Tokyo" |
+| **MCP / external tools** | | |
+| `MCPCallOp[In, Out]` | external | Generic single-call MCP tool wrapper. Embed in a concrete struct with typed In/Out and register the subclass. Optional warm-replenish pool via `pool_size` |
+| `MCPScriptOp[In, Out]` | external | Generic multi-call MCP scripted session — one DAG step makes many tool calls that share server-side state (browser, file handles). Embed + register. Optional warm-replenish pool via `pool_size` |
 | **AI ops** | | |
 | `ModeSelectOp` | AI | Classifies input text into one of a fixed set of categories |
 | `AIBoolOp` | AI | Yes/no predicate about input text |
@@ -290,6 +293,35 @@ Vertex("positive_branch").Op("MyOp").
 
 When the predicate returns false the vertex (and all vertices that depend exclusively on its outputs) is skipped. Use `CoalesceNStringOp` (or a similar merge op with `Merge(config.MergeCoalesce)`) downstream to collect whichever branch actually ran.
 
+### MCP operators
+
+`MCPCallOp[In, Out]` and `MCPScriptOp[In, Out]` invoke an MCP server (local subprocess via stdio, or remote via streamable HTTP) as a workflow step. They are escape hatches for steps that need an external tool (a headless browser, a sandboxed filesystem, a hosted vector-search service) without writing transport plumbing yourself. Embed the generic in a named concrete struct with typed In/Out and register that — never register the generic directly. The `transport` param selects `"stdio"` (default) or `"http"`. See `examples/remote-mcp-server/main.go` for a single-call MCPCallOp variant against a remote HTTP MCP server, and `examples/local-mcp-server/main.go` for the scripted multi-call form against a local subprocess.
+
+#### Warm-replenish pool
+
+By default each `Run` spawns a fresh MCP subprocess and tears it down on completion. When the cold start dominates wall time (e.g. Playwright launching Chromium for every screenshot in a fan-out), opt into the warm-replenish pool by setting `pool_size: "N"` on the vertex params. The pool keeps N pre-started sessions ready and refills the slot in a background goroutine after each borrow, so subsequent vertices skip the cold start. Each borrow yields a *fresh* session — sessions are never reused for a second logical call — so stateful servers (browser tabs, file cursors) cannot leak state across vertices.
+
+`pool_prewarm` defaults to `"true"`: the pool fills during `Setup`. Set it to `"false"` for lazy fill (first borrow pays cold start; subsequent borrows are warm).
+
+When any vertex sets `pool_size > 0`, defer `ShutdownMCPPool` from `main()` so pre-started subprocesses drain on exit:
+
+```go
+defer library.ShutdownMCPPool(context.Background())
+```
+
+Run `examples/local-mcp-server` with `--log-level=debug` to see the pool in action — `mcp pool prewarm scheduled`, `mcp pool acquire warm hit`, and `mcp pool replenish ok` lines trace each lifecycle event. Pooling is supported only for `transport: "stdio"` in v1; HTTP MCP vertices reject `pool_size > 0` at `Setup`.
+
+#### Custom argument and response shapes
+
+By default, `MCPCallOp` JSON-marshals the dereferenced `*In` value as the tool's `arguments` object, and dispatches the result over the `Out` type — `string`, `float64`, `int`, `bool`, `[]string`, `[]float64`, `[]int`, `map[string]string`, or any other type via `json.Unmarshal` (structured content is preferred when the server emits it).
+
+Two optional interfaces let In/Out types override these defaults:
+
+- **`MCPArgsFormatter`** — implement `FormatMCPArgs() (any, error)` on the `In` type when the tool's argument schema doesn't match the natural JSON shape of your struct (nested wrapping, renamed fields, dynamic keys).
+- **`MCPResponseParser`** — implement `ParseMCPResponse(text string, structured json.RawMessage) error` on `*Out` to fully control parsing of the tool's reply. Receives both the concatenated text content and the raw structured-content JSON (nil if the tool emitted none).
+
+Inside an `MCPScriptOp` script, `MCPSession.CallTool` returns a `*MCPToolError` when the server reports a tool-level error (`IsError=true`); transport / I/O failures surface as their underlying error. Scripts that want to recover from anticipated failures (element-not-found on a click, missing file) can `errors.As` against `*MCPToolError` and continue.
+
 ### Map nodes
 
 Fan out a sub-graph over each element of a slice:
@@ -311,18 +343,20 @@ Each example is a standalone Go binary that builds and runs a dagor workflow. Al
 
 | Example | Description | Env vars required |
 |---|---|---|
-| [`01-ticket-triager`](examples/01-ticket-triager/) | Classifies a free-text support ticket into billing / bug / feature / other and routes it through a category-specific extraction lane to produce structured output. | `CLAUDE_API_KEY` |
-| [`02-recipe-analyzer`](examples/02-recipe-analyzer/) | Fetches recipe instructions from TheMealDB (or a local fixture), runs three parallel AI extractors (ingredients, steps, cook time), scores difficulty deterministically, and returns difficulty-specific cooking advice. Uses Gemini for all AI vertices. | `GEMINI_API_KEY` |
-| [`03-readme-quality`](examples/03-readme-quality/) | Fetches a GitHub README (or fixture), runs five AI quality probes in parallel, averages the scores, and routes through a quality-band lane to produce a structured report. | `CLAUDE_API_KEY` |
-| [`04-weather-advisor`](examples/04-weather-advisor/) | Fetches live weather data for a city (or fixture), classifies conditions via AI, and combines deterministic temperature-band logic with AI-generated outfit advice. | `CLAUDE_API_KEY` |
-| [`05-hn-topic-brief`](examples/05-hn-topic-brief/) | Queries the HN Algolia API for a topic, fans out per-story relevance and classification checks over a MapOver node, identifies the dominant category, and produces a styled topic brief. | `CLAUDE_API_KEY` |
-| [`06-faithful-summary`](examples/06-faithful-summary/) | Demonstrates cross-model verification: Claude summarizes a source document in 3–5 sentences, then Gemini independently checks whether every claim in the summary is grounded in the source text, returning a boolean faithfulness verdict. | `CLAUDE_API_KEY`, `GEMINI_API_KEY` |
+| [`ticket-triager`](examples/ticket-triager/) | Classifies a free-text support ticket into billing / bug / feature / other and routes it through a category-specific extraction lane to produce structured output. | `CLAUDE_API_KEY` |
+| [`recipe-analyzer`](examples/recipe-analyzer/) | Fetches recipe instructions from TheMealDB (or a local fixture), runs three parallel AI extractors (ingredients, steps, cook time), scores difficulty deterministically, and returns difficulty-specific cooking advice. Uses Gemini for all AI vertices. | `GEMINI_API_KEY` |
+| [`readme-quality`](examples/readme-quality/) | Fetches a GitHub README (or fixture), runs five AI quality probes in parallel, averages the scores, and routes through a quality-band lane to produce a structured report. | `CLAUDE_API_KEY` |
+| [`weather-advisor`](examples/weather-advisor/) | Fetches live weather data for a city (or fixture), classifies conditions via AI, and combines deterministic temperature-band logic with AI-generated outfit advice. | `CLAUDE_API_KEY` |
+| [`hn-topic-brief`](examples/hn-topic-brief/) | Queries the HN Algolia API for a topic, fans out per-story relevance and classification checks over a MapOver node, identifies the dominant category, and produces a styled topic brief. | `CLAUDE_API_KEY` |
+| [`faithful-summary`](examples/faithful-summary/) | Demonstrates cross-model verification: Claude summarizes a source document in 3–5 sentences, then Gemini independently checks whether every claim in the summary is grounded in the source text, returning a boolean faithfulness verdict. | `CLAUDE_API_KEY`, `GEMINI_API_KEY` |
+| [`local-mcp-server`](examples/local-mcp-server/) | Two `MCPScriptOp` variants composed via MapOver against a local Playwright MCP subprocess: a Google search returns a slice of URLs, and per-URL screenshot sub-vertices fan out using the warm-replenish pool (`pool_size: 8`). Demonstrates `defer library.ShutdownMCPPool(...)` in `main()`. | none (requires `npx`) |
+| [`remote-mcp-server`](examples/remote-mcp-server/) | Single-vertex `MCPCallOp` against a remote (HTTP) MCP server — calls Cloudflare's public docs MCP at `https://docs.mcp.cloudflare.com/mcp` and prints the search result text. The minimal pattern for `transport: "http"`. | none |
 
 ```bash
 # Example: run the summarization faithfulness checker
 export CLAUDE_API_KEY=<your Anthropic key>
 export GEMINI_API_KEY=<your Google AI key>
-go run ./examples/06-faithful-summary --file article.txt
+go run ./examples/faithful-summary --file article.txt
 ```
 
 ## Claude Code Skills
@@ -413,6 +447,10 @@ clawdag-go/
 │   ├── time_ops.go         — CityTimeOp
 │   ├── mode_select_op.go   — ModeSelectOp
 │   ├── ai_compute_op.go    — generic AIComputeOp[In, Out] base
+│   ├── mcp_client.go       — low-level MCP session (subprocess + protocol handshake)
+│   ├── mcp_call_op.go      — generic MCPCallOp[In, Out] (single-call MCP wrapper)
+│   ├── mcp_script_op.go    — generic MCPScriptOp[In, Out] (multi-call scripted MCP session)
+│   ├── mcp_pool.go         — warm-replenish session pool + ShutdownMCPPool
 │   ├── gen.go              — //go:generate directives for library ops
 │   └── *_gen.go            — generated (do not edit)
 ├── tools/

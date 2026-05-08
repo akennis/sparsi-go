@@ -131,7 +131,8 @@ func AllDescriptions() string {
 			JSONExtractOpDescription,
 		}},
 		{"## MCP", []string{
-			MCPFilesystemReadFileOpDescription,
+			MCPCallOpDescription,
+			MCPScriptOpDescription,
 		}},
 	}
 

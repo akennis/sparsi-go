@@ -151,6 +151,39 @@ if *input == "" { log.Fatal("--input is required") }
 // then: context.WithValue, buildGraph, eng.Run
 ```
 
+## MCP transport selection
+MCP vertices accept a `transport` param of either `"stdio"` (default) or `"http"`. Stdio
+vertices require `command` and accept optional `args` / `env`. HTTP vertices require `url`
+and accept optional `headers` (CSV `KEY=VALUE` pairs injected on every request — typical
+use is a Bearer token: `headers: "Authorization=Bearer ${TOKEN}"`). Default to `"stdio"`
+for any local server (npx/uvx); use `"http"` only when the user is explicitly targeting a
+remote MCP endpoint.
+
+## MCP pool lifecycle
+Pooling applies **only to `transport: "stdio"` MCP vertices in v1.** Setup rejects
+`pool_size > 0` for `transport: "http"`. When any stdio MCP vertex sets `pool_size > 0`
+(warm-replenish pool for `MCPCallOp` / `MCPScriptOp`), `main()` MUST defer
+`library.ShutdownMCPPool(context.Background())` after the engine pool release so pre-started
+subprocesses drain on exit:
+```go
+defer pool.Release()
+defer library.ShutdownMCPPool(context.Background())
+```
+Use the named import `clawdag "github.com/akennis/clawdag-go/library"` (or `library` alias)
+to call `ShutdownMCPPool`. Skip the defer when no stdio MCP vertex sets `pool_size`.
+
+## Custom MCP argument and response shapes
+The default `MCPCallOp` Out dispatch handles `string`, `float64`, `int`, `bool`, `[]string`,
+`[]float64`, `[]int`, `map[string]string`, and any struct decodable via `json.Unmarshal`
+(structured content preferred when the server emits it). When the tool's argument schema
+doesn't match the natural JSON shape of the `In` struct, implement
+`FormatMCPArgs() (any, error)` on `*In` (the `library.MCPArgsFormatter` interface). When
+the response cannot be decoded by the default dispatch, implement
+`ParseMCPResponse(text string, structured json.RawMessage) error` on `*Out`
+(the `library.MCPResponseParser` interface). Inside `MCPScriptOp` scripts, recover from
+anticipated tool errors via `errors.As(&toolErr)` against `*library.MCPToolError`;
+transport / I/O failures surface as their underlying error.
+
 ## Known library gaps
 Write these as inline custom ops when needed:
 

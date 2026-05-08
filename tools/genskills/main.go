@@ -6,7 +6,7 @@
 //   - skill-src/<skill>/references/examples/README.md                → verbatim copy
 //   - skill-src/clawdag-design/references/design-rules.md            → verbatim copy
 //   - skill-src/clawdag-codegen/references/dagor-api.md              → verbatim copy
-//   - examples/0N-*/main.go                                          → examples/0N-*.go (with //go:build ignore prepended)
+//   - examples/<name>/main.go                                        → examples/<name>.go (with //go:build ignore prepended)
 //   - library.AllDescriptions()                                      → library.md (per skill)
 //
 // Run via: go generate .
@@ -24,12 +24,14 @@ import (
 var skillNames = []string{"clawdag-design", "clawdag-codegen"}
 
 var exampleDirs = []string{
-	"01-ticket-triager",
-	"02-recipe-analyzer",
-	"03-readme-quality",
-	"04-weather-advisor",
-	"05-hn-topic-brief",
-	"06-faithful-summary",
+	"ticket-triager",
+	"recipe-analyzer",
+	"readme-quality",
+	"weather-advisor",
+	"hn-topic-brief",
+	"faithful-summary",
+	"local-mcp-server",
+	"remote-mcp-server",
 }
 
 func main() {

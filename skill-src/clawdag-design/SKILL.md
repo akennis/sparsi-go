@@ -25,12 +25,12 @@ Read the following references before producing any output:
 
 | Workflow pattern | Example |
 |---|---|
-| Free-form text → fixed categories → per-lane extraction → coalesce | `01-ticket-triager.go` |
-| Parse fields + deterministic numeric scoring | `02-recipe-analyzer.go` |
-| Parallel HTTP fetch + status-code fallback + multi-probe scoring | `03-readme-quality.go` |
-| Parsed data + threshold routing + conditional warning suffix | `04-weather-advisor.go` |
-| Runtime slice → MapOver fan-out → per-item sub-graph → aggregation | `05-hn-topic-brief.go` |
-| Two AI models in series — Claude generates, Gemini independently verifies | `06-faithful-summary.go` |
+| Free-form text → fixed categories → per-lane extraction → coalesce | `ticket-triager.go` |
+| Parse fields + deterministic numeric scoring | `recipe-analyzer.go` |
+| Parallel HTTP fetch + status-code fallback + multi-probe scoring | `readme-quality.go` |
+| Parsed data + threshold routing + conditional warning suffix | `weather-advisor.go` |
+| Runtime slice → MapOver fan-out → per-item sub-graph → aggregation | `hn-topic-brief.go` |
+| Two AI models in series — Claude generates, Gemini independently verifies | `faithful-summary.go` |
 
 # Steps
 
@@ -70,6 +70,30 @@ N. **vertex_name** — `[MAP]` — item_wire: `item`
           - In: FieldName ← `item` (or intermediate wire)
           - Out: FieldName → `wire_name`
    - CollectInto: `result_wire` → `output_wire` ([]any)
+
+For MCP vertices (`MCPCallOp`, `MCPScriptOp`, or concrete variants thereof), the `transport`
+Param selects how the server is reached:
+- `transport: "stdio"` (default — back-compat) requires `command` and accepts optional `args` /
+  `env` (CSV `KEY=VALUE`).
+- `transport: "http"` requires `url` and accepts optional `headers` (CSV `KEY=VALUE` for
+  static auth — e.g. `Authorization=Bearer ${TOKEN}`).
+
+`pool_size: N` is a valid optional Param indicating the warm-replenish pool capacity. **Pooling
+is only supported for `transport: "stdio"` in v1** — Setup rejects `pool_size > 0` when
+`transport: "http"` because remote sessions can be killed by server-side idle timeouts and
+static `headers` tokens may expire while sessions sit warm. Include `pool_size` for stdio
+vertices that sit in a fan-out (MapOver sub-graph) or otherwise run repeatedly with the same
+spec, since subprocess cold-start cost (launch, MCP handshake, browser/server init) is
+otherwise paid every Run.
+
+The default MCP Out dispatch handles `string`, `float64`, `int`, `bool`, `[]string`,
+`[]float64`, `[]int`, `map[string]string`, and any struct decodable via `json.Unmarshal`.
+When the tool's argument schema doesn't fit the natural JSON shape of the In struct, or the
+response can't be decoded by the default dispatch, flag this in **Custom Ops Needed**: the
+In type will implement `MCPArgsFormatter` (`FormatMCPArgs`) and/or the Out type will
+implement `MCPResponseParser` (`ParseMCPResponse`). For `MCPScriptOp` scripts that need to
+recover from anticipated tool errors (e.g. element-not-found on a click), note that the
+script `errors.As`-checks `*MCPToolError`.
 
 ### Predicates
 - `pred_name`: which wire it reads, what value triggers it
