@@ -37,3 +37,6 @@ library/skills/
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# local mcp
+.playwright-mcp/
