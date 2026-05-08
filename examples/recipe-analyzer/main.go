@@ -61,8 +61,8 @@ func init() {
 // ─── Predicates ────────────────────────────────────────────────────────────
 
 const (
-	easyMax = 15.0
-	hardMin = 30.0
+	easyMax = 20.0
+	hardMin = 50.0
 )
 
 func registerPredicates() {
@@ -148,12 +148,12 @@ func buildGraph(mode sourceMode) (*graph.Graph, error) {
 		Output("Result", "ingredients").
 
 		Vertex("steps").Op("AIExtractStringSliceOp").
-		Params(map[string]string{"operation": "extract every discrete cooking step from these recipe instructions as a flat list (one step per item)", "provider": "gemini", "model": "gemini-3-flash-preview"}).
+		Params(map[string]string{"operation": "extract every discrete step required to prepare and cook the meal as a flat list (one step per item); exclude optional storage (like freezing) and serving suggestions", "provider": "gemini", "model": "gemini-3-flash-preview"}).
 		Input("Input", "instructions_text").
 		Output("Result", "steps").
 
 		Vertex("cook_minutes").Op("AIParseNumberOp").
-		Params(map[string]string{"operation": "estimate total active+passive cooking time in minutes from these instructions; respond with a single integer", "provider": "gemini", "model": "gemini-3-flash-preview"}).
+		Params(map[string]string{"operation": "estimate total active and passive cooking time in minutes; if a step is optional or provides a time range, use the minimum time; respond with a single integer", "provider": "gemini", "model": "gemini-3-flash-preview"}).
 		Input("Input", "instructions_text").
 		Output("Result", "cook_minutes").
 
@@ -315,7 +315,7 @@ func main() {
 	defer cancel()
 	ctx = context.WithValue(ctx, pathInstructionsKey{}, "meals.0.strInstructions")
 	ctx = context.WithValue(ctx, pathMealnameKey{}, "meals.0.strMeal")
-	ctx = context.WithValue(ctx, stepWeightKey{}, 1.5)
+	ctx = context.WithValue(ctx, stepWeightKey{}, 1.0)
 	ctx = context.WithValue(ctx, cookWeightKey{}, 0.1)
 	if mode == sourceFixture {
 		ctx = context.WithValue(ctx, bodyKey{}, body)
