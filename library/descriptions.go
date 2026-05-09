@@ -118,6 +118,7 @@ func AllDescriptions() string {
 			AIBoolOpDescription,
 			AIBestMatchOpDescription,
 			AIRerankOpDescription,
+			WithRepairDescription,
 		}},
 		{"## Time", []string{
 			CityTimeOpDescription,

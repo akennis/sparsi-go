@@ -1,0 +1,6 @@
+{
+  "id": "T-77",
+  "priority": "P1",
+  "reporter": "bob@example.com",
+  "summary": "App crashes on startup with NPE in MainActivity.onCreate"
+}

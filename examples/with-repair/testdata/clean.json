@@ -1,0 +1,6 @@
+{
+  "id": "T-1042",
+  "priority": "high",
+  "reporter_email": "alice@example.com",
+  "summary": "Login page returns 500 after the most recent deploy"
+}

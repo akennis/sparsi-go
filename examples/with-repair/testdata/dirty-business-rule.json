@@ -1,0 +1,6 @@
+{
+  "id": "T-2099",
+  "priority": "urgent",
+  "reporter_email": "carol@example.com",
+  "summary": "Production payments service is dropping every 3rd transaction since 14:20 UTC"
+}

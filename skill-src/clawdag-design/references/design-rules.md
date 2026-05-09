@@ -175,6 +175,36 @@ Map node design rules:
 5. CollectInto gathers each execution's result wire into a []any output.
 6. Downstream ops receive []any and type-assert to the concrete element type.
 
+# AI-WRAPPED VERTICES — RENDERER HINT
+When a vertex is wrapped by `library.WithRepair`, the wrapper IS part of the AI
+surface. It must be visible at-a-glance in BOTH the ASCII DAG and the Vertices
+list. Hiding the wrapper inside the inner op's vertex name defeats the audit
+question "where does the LLM influence outcomes?" — the wrapper consults an
+LLM on every repairable error, even when the inner op is fully deterministic.
+
+**ASCII DAG** — append a `[AI:WithRepair]` suffix tag to the wrapped vertex name:
+
+```
+raw_text → parse_ticket [AI:WithRepair] → ticket
+        → validate_routing [AI:WithRepair] → validated
+        → render_output → final
+```
+
+**Vertices list** — under the wrapped vertex, add a `Wrapper:` line BEFORE In/Out
+naming the wrapper and its key params:
+
+```
+2. **parse_ticket** — `ParseTicketOp` — Params: max_attempts=3
+   - Wrapper: `WithRepair` (input_field=Raw, max_attempts=3)
+   - In: Raw ← `raw_text`
+   - Out: Result → `ticket`
+```
+
+Do NOT use the `[AI:...]` suffix on plain AI ops (`AIBoolOp`, `AIScoreOp`,
+`AIComputeMapOp`, etc.) — those are already named for the LLM call they make.
+The suffix is reserved for ops that wrap another op, because only the wrapped
+form risks an audit confusion about whether the LLM is in the path.
+
 # AVAILABLE LIBRARY OPS:
 {{LIBRARY_DESCRIPTION}}
 

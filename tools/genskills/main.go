@@ -32,6 +32,7 @@ var exampleDirs = []string{
 	"faithful-summary",
 	"local-mcp-server",
 	"remote-mcp-server",
+	"with-repair",
 }
 
 func main() {

@@ -200,6 +200,63 @@ Use `clawdag "github.com/akennis/clawdag-go/library"` as the named import when e
 `AIComputeOp`. When `Out` is a struct, implement `ExpectedFormat() string` and
 `ParseAIResponse(string) error` on `*Out` to replace the default format prompt and parser.
 
+## AI recovery wrapper (WithRepair)
+When a deterministic op may fail on structurally-fixable bad input (malformed JSON,
+near-miss enum, missing field, schema-violating record), wrap it via
+`clawdag.RegisterWithRepair` to give it bounded LLM-driven retry. The inner op opts in
+by returning `*clawdag.ErrRepairable{Prompt, Cause}`; the input type opts in by
+implementing `clawdag.RepairableInput` (`UnmarshalRepair(string) error`).
+
+```go
+// 1. Inner op returns *clawdag.ErrRepairable on repairable failures.
+//    Prompt MUST be self-contained — include the current input verbatim,
+//    the validation error, and the exact expected response shape.
+func (op *ParseTicketOp) Run(_ context.Context) error {
+    if err := json.Unmarshal([]byte(op.Raw.Text), &op.Result); err != nil {
+        return &clawdag.ErrRepairable{
+            Prompt: fmt.Sprintf("Below is invalid ticket JSON (error: %v). %s\n\nInput:\n%s\n\nOutput corrected JSON only.",
+                err, ticketSchemaSpec, op.Raw.Text),
+            Cause:  err,
+        }
+    }
+    return nil
+}
+
+// 2. Input type implements RepairableInput so the wrapper can deserialize
+//    the LLM's response back into a typed value.
+type TicketRaw struct{ Text string }
+func (t *TicketRaw) UnmarshalRepair(s string) error { t.Text = strings.TrimSpace(s); return nil }
+
+// 3. Register the wrapped op from init() under a distinct name.
+func init() {
+    clawdag.RegisterWithRepair[*ParseTicketOp](
+        "ParseTicketRepair",
+        func() *ParseTicketOp { return &ParseTicketOp{} },
+        clawdag.RepairConfig{
+            InputField:   "Raw",   // required: the inner field the LLM may mutate
+            MaxAttempts:  3,
+            PromptPrefix: "You are a strict JSON corrector. Output corrected JSON only.\n\n",
+        },
+    )
+}
+```
+
+Wire the wrapped vertex by its **registered name** (`"ParseTicketRepair"`), not the
+inner type name. Input/output field names match the inner op exactly:
+```go
+Vertex("parse").Op("ParseTicketRepair").Input("Raw", "raw_wire").Output("Result", "parsed_wire")
+```
+
+Use the `clawdag "github.com/akennis/clawdag-go/library"` named import. When the
+field to repair is a struct (not a string wrapper), have the struct's
+`UnmarshalRepair` delegate to `xml.Unmarshal` — XML is preferred over JSON for
+record-shaped repair payloads. See `references/examples/with-repair.go` for both
+string-target and struct-target stages in one workflow.
+
+**Inner op MUST be idempotent or pure** — repair re-executes `Run` with mutated
+input. Do not wrap ops that have side effects (DB writes, network mutations,
+file deletes).
+
 ## Required imports
 ```go
 // Standard library

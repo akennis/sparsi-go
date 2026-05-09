@@ -31,6 +31,7 @@ Read the following references before producing any output:
 | Parsed data + threshold routing + conditional warning suffix | `weather-advisor.go` |
 | Runtime slice → MapOver fan-out → per-item sub-graph → aggregation | `hn-topic-brief.go` |
 | Two AI models in series — Claude generates, Gemini independently verifies | `faithful-summary.go` |
+| Strict parse/validate op + AI-driven minimal-mutation retry on bad input (`WithRepair`) | `with-repair.go` |
 
 # Steps
 
@@ -54,11 +55,14 @@ Respond ONLY with the following structured document. No Go code. No markdown out
 ## Workflow: [short name]
 
 ### ASCII DAG
-[diagram showing vertices and data flow with → arrows]
+[diagram showing vertices and data flow with → arrows; vertices wrapped by
+`library.WithRepair` carry a trailing `[AI:WithRepair]` tag — see
+"AI-WRAPPED VERTICES — RENDERER HINT" in `references/design-rules.md`]
 
 ### Vertices
 List each vertex in topological order:
 N. **vertex_name** — `OpName` — [Condition: pred_name] — Params: key=value, ...
+   - Wrapper: `WithRepair` (input_field=FieldName, max_attempts=N)   — only when WithRepair-wrapped
    - In: FieldName ← `wire_name`
    - Out: FieldName → `wire_name`
 
