@@ -362,7 +362,7 @@ func (op *AIScoreOp) Run(ctx context.Context) error {
 	for attempt := 0; attempt <= op.maxRetries; attempt++ {
 		maxTokens := int64(16)
 		if isReasoning {
-			maxTokens = 512
+			maxTokens = 256
 		}
 		res, err := op.caller.call(ctx, aiCallRequest{
 			SystemText: systemText,
