@@ -177,8 +177,12 @@ func (c *geminiCaller) call(ctx context.Context, req aiCallRequest) (aiCallResul
 		inputTokens = int64(result.UsageMetadata.PromptTokenCount)
 		outputTokens = int64(result.UsageMetadata.CandidatesTokenCount)
 	}
+	text := result.Text()
+	if text == "" && len(result.Candidates) > 0 {
+		slog.WarnContext(ctx, "gemini.empty", "finish_reason", result.Candidates[0].FinishReason)
+	}
 	return aiCallResult{
-		Text:         result.Text(),
+		Text:         text,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 	}, nil
