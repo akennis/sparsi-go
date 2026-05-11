@@ -364,6 +364,9 @@ func (op *AIScoreOp) Run(ctx context.Context) error {
 		if isReasoning {
 			maxTokens = 256
 		}
+		if op.provider == "gemini" && maxTokens < 64 {
+			maxTokens = 64
+		}
 		res, err := op.caller.call(ctx, aiCallRequest{
 			SystemText: systemText,
 			Prompt:     prompt,
