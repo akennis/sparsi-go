@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -174,19 +175,38 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 		systemText = "Respond only with the requested format. Do not include any explanation or markdown formatting."
 	}
 
+	// State across attempts:
+	//   - Stateless retry (default): each attempt sends basePrompt plus an
+	//     optional retry-template addendum built from prevResponse/prevErr.
+	//   - Conversational repair: triggered the first time parseResult returns
+	//     *ErrRepairable. Once entered, subsequent attempts grow `history` and
+	//     send `nextPrompt` as the latest user turn, threading the model's
+	//     reasoning across turns of the same conversation.
 	var prevResponse, prevErr string
+	var history []aiTurn
+	var nextPrompt string
+	conversational := false
+
 	for attempt := 0; attempt <= op.maxRetries; attempt++ {
-		prompt := basePrompt
-		if prevResponse != "" {
-			prompt += "\n" + strings.NewReplacer(
-				"{{PREVIOUS_RESPONSE}}", prevResponse,
-				"{{PARSE_ERROR}}", prevErr,
-			).Replace(aiComputeRetryTemplate)
+		var sentPrompt string
+		var sendHistory []aiTurn
+		if conversational {
+			sentPrompt = nextPrompt
+			sendHistory = history
+		} else {
+			sentPrompt = basePrompt
+			if prevResponse != "" {
+				sentPrompt += "\n" + strings.NewReplacer(
+					"{{PREVIOUS_RESPONSE}}", prevResponse,
+					"{{PARSE_ERROR}}", prevErr,
+				).Replace(aiComputeRetryTemplate)
+			}
 		}
 
 		res, err := op.caller.call(ctx, aiCallRequest{
 			SystemText: systemText,
-			Prompt:     prompt,
+			Prompt:     sentPrompt,
+			History:    sendHistory,
 			MaxTokens:  16 * 1024,
 		})
 		if err != nil {
@@ -196,6 +216,22 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 
 		raw := strings.TrimSpace(res.Text)
 
+		// envelopeFailed records an envelope/format failure for retry feedback.
+		// When conversational, append a corrective user turn; otherwise fall
+		// back to the stateless retry template via prevResponse/prevErr.
+		envelopeFailed := func(detail string) {
+			if conversational {
+				history = append(history, aiTurn{Role: "user", Text: sentPrompt})
+				history = append(history, aiTurn{Role: "assistant", Text: raw})
+				nextPrompt = "Your last response could not be parsed: " + detail + ". Please try again, following the original format exactly."
+				slog.DebugContext(ctx, "AIComputeOp.repair.format", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", detail)
+				return
+			}
+			prevResponse = raw
+			prevErr = detail
+			slog.DebugContext(ctx, "AIComputeOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", detail)
+		}
+
 		var resultStr, reasoning string
 		if isReasoning {
 			var envelope struct {
@@ -203,17 +239,13 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 				Reasoning string          `json:"reasoning"`
 			}
 			if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
-				prevResponse = raw
-				prevErr = fmt.Sprintf("expected JSON {result, reasoning}, got %q: %v", raw, err)
-				slog.DebugContext(ctx, "AIComputeOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", prevErr)
+				envelopeFailed(fmt.Sprintf("expected JSON {result, reasoning}, got %q: %v", raw, err))
 				continue
 			}
 			// Unwrap result: JSON string → Go string (handles escaping); otherwise use raw bytes.
 			if len(envelope.Result) > 0 && envelope.Result[0] == '"' {
 				if err := json.Unmarshal(envelope.Result, &resultStr); err != nil {
-					prevResponse = raw
-					prevErr = fmt.Sprintf("could not decode result field %q: %v", string(envelope.Result), err)
-					slog.DebugContext(ctx, "AIComputeOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", prevErr)
+					envelopeFailed(fmt.Sprintf("could not decode result field %q: %v", string(envelope.Result), err))
 					continue
 				}
 			} else {
@@ -225,9 +257,17 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 		}
 
 		if parseErr := op.parseResult(resultStr); parseErr != nil {
-			prevResponse = raw
-			prevErr = parseErr.Error()
-			slog.DebugContext(ctx, "AIComputeOp.retry", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "error", parseErr)
+			var rep *ErrRepairable
+			if errors.As(parseErr, &rep) {
+				// Enter / continue conversational repair.
+				history = append(history, aiTurn{Role: "user", Text: sentPrompt})
+				history = append(history, aiTurn{Role: "assistant", Text: raw})
+				nextPrompt = rep.Prompt
+				conversational = true
+				slog.DebugContext(ctx, "AIComputeOp.repair.semantic", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "cause", rep.Cause)
+				continue
+			}
+			envelopeFailed(parseErr.Error())
 			continue
 		}
 
@@ -240,6 +280,9 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 		return nil
 	}
 
+	if conversational {
+		return fmt.Errorf("AIComputeOp: all %d attempts failed in conversational repair; last prompt: %s", op.maxRetries+1, nextPrompt)
+	}
 	return fmt.Errorf("AIComputeOp: all %d attempts failed; last error: %s", op.maxRetries+1, prevErr)
 }
 

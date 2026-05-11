@@ -33,6 +33,23 @@ Read the following references before producing any output:
 | Two AI models in series — Claude generates, Gemini independently verifies | `faithful-summary.go` |
 | Strict parse/validate op + AI-driven minimal-mutation retry on bad input (`WithRepair`) | `with-repair.go` |
 
+# AI recovery wrapper (WithRepair) placement
+
+WithRepair is most suitable at the **upstream boundary** of the DAG — wrap the op
+that first ingests outside input (user text, fetched payloads, untrusted JSON,
+third-party API responses) so the workflow validates and, if necessary, repairs
+that input before anything downstream depends on it. Once a value has passed a
+WithRepair stage, downstream vertices can treat it as well-formed and skip
+defensive re-parsing.
+
+**Do not** wrap an AI op (`AIComputeOp` and its embedders) with `WithRepair` to
+validate its output. AI ops support in-conversation self-repair: have the `Out`
+type's `ParseAIResponse` return `*library.ErrRepairable` on a fixable miss, and
+the op will append a follow-up turn in the same LLM conversation rather than
+opening a fresh repair call. Note this in the design's **AI Ops Used** section
+when an AI op is self-validating (e.g. `score (AIScoreOp, self-repair on
+out-of-range)`); do not add a separate WithRepair vertex around it.
+
 # Steps
 
 1. Read `references/library.md` and identify every op that is relevant to the task.

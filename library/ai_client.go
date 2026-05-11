@@ -16,9 +16,17 @@ import (
 	"google.golang.org/genai"
 )
 
+// aiTurn is one entry in a multi-turn conversation. Role must be "user" or
+// "assistant". Empty History means a single-turn request (the default).
+type aiTurn struct {
+	Role string
+	Text string
+}
+
 type aiCallRequest struct {
 	SystemText string
 	Prompt     string
+	History    []aiTurn // optional prior turns; Prompt is appended as the final user turn
 	MaxTokens  int64
 }
 
@@ -131,11 +139,21 @@ type anthropicCaller struct{ model string }
 
 func (c *anthropicCaller) call(ctx context.Context, req aiCallRequest) (aiCallResult, error) {
 	client := anthropic.NewClient(option.WithAPIKey(os.Getenv("CLAUDE_API_KEY")))
+	messages := make([]anthropic.MessageParam, 0, len(req.History)+1)
+	for _, t := range req.History {
+		block := anthropic.NewTextBlock(t.Text)
+		if t.Role == "assistant" {
+			messages = append(messages, anthropic.NewAssistantMessage(block))
+		} else {
+			messages = append(messages, anthropic.NewUserMessage(block))
+		}
+	}
+	messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(req.Prompt)))
 	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.Model(c.model),
 		MaxTokens: req.MaxTokens,
 		System:    []anthropic.TextBlockParam{{Text: req.SystemText}},
-		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(req.Prompt))},
+		Messages:  messages,
 	})
 	if err != nil {
 		return aiCallResult{}, err
@@ -168,7 +186,16 @@ func (c *geminiCaller) call(ctx context.Context, req aiCallRequest) (aiCallResul
 		SystemInstruction: genai.NewContentFromText(req.SystemText, genai.RoleUser),
 		MaxOutputTokens:   int32(req.MaxTokens),
 	}
-	result, err := client.Models.GenerateContent(ctx, c.model, genai.Text(req.Prompt), config)
+	contents := make([]*genai.Content, 0, len(req.History)+1)
+	for _, t := range req.History {
+		var role genai.Role = genai.RoleUser
+		if t.Role == "assistant" {
+			role = genai.RoleModel
+		}
+		contents = append(contents, genai.NewContentFromText(t.Text, role))
+	}
+	contents = append(contents, genai.NewContentFromText(req.Prompt, genai.RoleUser))
+	result, err := client.Models.GenerateContent(ctx, c.model, contents, config)
 	if err != nil {
 		return aiCallResult{}, fmt.Errorf("gemini: generate content: %w", err)
 	}

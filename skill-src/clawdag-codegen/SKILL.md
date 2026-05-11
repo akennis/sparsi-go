@@ -200,12 +200,63 @@ Use `clawdag "github.com/akennis/clawdag-go/library"` as the named import when e
 `AIComputeOp`. When `Out` is a struct, implement `ExpectedFormat() string` and
 `ParseAIResponse(string) error` on `*Out` to replace the default format prompt and parser.
 
+### In-conversation self-repair (preferred over wrapping AI ops with `WithRepair`)
+`ParseAIResponse` can opt the op into **in-conversation repair** by returning
+`*clawdag.ErrRepairable{Prompt, Cause}`. When it does, `AIComputeOp.Run` keeps
+the same conversation open: it appends the model's prior response as an
+assistant turn, sends `ErrRepairable.Prompt` as the next user turn, and re-asks
+within the same `max_retries` budget. The model retains its prior reasoning
+context, so the correction is typically one short follow-up turn — no second
+cold call, no need to wrap the AI op with `WithRepair`.
+
+```go
+// Out type validates its own response; returns *ErrRepairable on fixable misses.
+type ScoreOut struct{ Value float64 }
+
+func (o *ScoreOut) ExpectedFormat() string {
+    return "Reply with a single float in [0, 1]. No prose."
+}
+
+func (o *ScoreOut) ParseAIResponse(response string) error {
+    f, err := strconv.ParseFloat(strings.TrimSpace(response), 64)
+    if err != nil {
+        return &clawdag.ErrRepairable{
+            Prompt: "Your last response was not a number. Reply with one float in [0, 1].",
+            Cause:  err,
+        }
+    }
+    if f < 0 || f > 1 {
+        return &clawdag.ErrRepairable{
+            Prompt: fmt.Sprintf("Your last response %v is outside [0, 1]. Clamp it and reply with just the number.", f),
+            Cause:  errors.New("out of range"),
+        }
+    }
+    o.Value = f
+    return nil
+}
+```
+
+Non-`*ErrRepairable` errors from `ParseAIResponse` continue to use the legacy
+single-shot retry (fresh prompt + previous-response feedback) — switch to
+`*ErrRepairable` when threading the conversation gives the model more useful
+context than re-asking from scratch.
+
+Use this **instead of** wrapping an AI op with `WithRepair`. Reserve
+`WithRepair` for *deterministic* ops at the input boundary (see above).
+
 ## AI recovery wrapper (WithRepair)
 When a deterministic op may fail on structurally-fixable bad input (malformed JSON,
 near-miss enum, missing field, schema-violating record), wrap it via
 `clawdag.RegisterWithRepair` to give it bounded LLM-driven retry. The inner op opts in
 by returning `*clawdag.ErrRepairable{Prompt, Cause}`; the input type opts in by
 implementing `clawdag.RepairableInput` (`UnmarshalRepair(string) error`).
+
+**Where it belongs in the DAG.** WithRepair is most suitable at the **upstream
+boundary** — wrap the op that first ingests outside input (user text, fetched
+payloads, untrusted JSON, third-party API responses) so the workflow validates and,
+if necessary, repairs that input before anything downstream depends on it. Once a
+value has passed a WithRepair stage, downstream vertices can treat it as well-formed
+and skip defensive re-parsing.
 
 ```go
 // 1. Inner op returns *clawdag.ErrRepairable on repairable failures.
