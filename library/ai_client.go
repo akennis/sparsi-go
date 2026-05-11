@@ -5,13 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/wwz16/dagor/config"
 	"google.golang.org/genai"
 )
@@ -64,14 +62,26 @@ func parseRetryConfig(params *config.Params) retryConfig {
 
 // newAICaller creates a caller for the given provider and model, wrapped with exponential backoff.
 // provider must be "claude" or "gemini"; model is passed through opaquely to the SDK.
-// Returns an error for unknown providers so graphs fail fast at Setup.
-func newAICaller(provider, model string, cfg retryConfig) (aiCaller, error) {
+// ref and factoryID select credentials: ref is passed through to the factory verbatim,
+// factoryID selects which registered factory to use (empty → process default).
+// Returns an error for unknown providers or factory failures so graphs fail fast at Setup.
+func newAICaller(provider, model, ref, factoryID string, cfg retryConfig) (aiCaller, error) {
+	factory := resolveFactory(factoryID)
+	ctx := context.Background()
 	var inner aiCaller
 	switch provider {
 	case "claude":
-		inner = &anthropicCaller{model: model}
+		c, err := factory.Anthropic(ctx, ref)
+		if err != nil {
+			return nil, fmt.Errorf("anthropic client: %w", err)
+		}
+		inner = &anthropicCaller{model: model, client: c}
 	case "gemini":
-		inner = &geminiCaller{model: model}
+		c, err := factory.Gemini(ctx, ref)
+		if err != nil {
+			return nil, fmt.Errorf("gemini client: %w", err)
+		}
+		inner = &geminiCaller{model: model, client: c}
 	default:
 		return nil, fmt.Errorf("unsupported provider %q: must be \"claude\" or \"gemini\"", provider)
 	}
@@ -134,11 +144,13 @@ func (c *retryingCaller) call(ctx context.Context, req aiCallRequest) (aiCallRes
 }
 
 // anthropicCaller calls the Anthropic Messages API.
-// API key is read from CLAUDE_API_KEY.
-type anthropicCaller struct{ model string }
+// The SDK client is built once at Setup via AIClientFactory.
+type anthropicCaller struct {
+	model  string
+	client *anthropic.Client
+}
 
 func (c *anthropicCaller) call(ctx context.Context, req aiCallRequest) (aiCallResult, error) {
-	client := anthropic.NewClient(option.WithAPIKey(os.Getenv("CLAUDE_API_KEY")))
 	messages := make([]anthropic.MessageParam, 0, len(req.History)+1)
 	for _, t := range req.History {
 		block := anthropic.NewTextBlock(t.Text)
@@ -149,7 +161,7 @@ func (c *anthropicCaller) call(ctx context.Context, req aiCallRequest) (aiCallRe
 		}
 	}
 	messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(req.Prompt)))
-	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+	msg, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.Model(c.model),
 		MaxTokens: req.MaxTokens,
 		System:    []anthropic.TextBlockParam{{Text: req.SystemText}},
@@ -172,16 +184,13 @@ func (c *anthropicCaller) call(ctx context.Context, req aiCallRequest) (aiCallRe
 }
 
 // geminiCaller calls the Gemini GenerateContent API.
-// API key is read from GEMINI_API_KEY.
-type geminiCaller struct{ model string }
+// The SDK client is built once at Setup via AIClientFactory.
+type geminiCaller struct {
+	model  string
+	client *genai.Client
+}
 
 func (c *geminiCaller) call(ctx context.Context, req aiCallRequest) (aiCallResult, error) {
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey: os.Getenv("GEMINI_API_KEY"),
-	})
-	if err != nil {
-		return aiCallResult{}, fmt.Errorf("gemini: create client: %w", err)
-	}
 	config := &genai.GenerateContentConfig{
 		SystemInstruction: genai.NewContentFromText(req.SystemText, genai.RoleUser),
 		MaxOutputTokens:   int32(req.MaxTokens),
@@ -195,7 +204,7 @@ func (c *geminiCaller) call(ctx context.Context, req aiCallRequest) (aiCallResul
 		contents = append(contents, genai.NewContentFromText(t.Text, role))
 	}
 	contents = append(contents, genai.NewContentFromText(req.Prompt, genai.RoleUser))
-	result, err := client.Models.GenerateContent(ctx, c.model, contents, config)
+	result, err := c.client.Models.GenerateContent(ctx, c.model, contents, config)
 	if err != nil {
 		return aiCallResult{}, fmt.Errorf("gemini: generate content: %w", err)
 	}

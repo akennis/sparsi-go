@@ -13,8 +13,15 @@ import (
 	"github.com/wwz16/dagor/config"
 )
 
+// skipIfNoAPIKey skips a test unless the caller has explicitly opted into the
+// live-API path. We require BOTH RUN_LIVE_AI=1 and CLAUDE_API_KEY so the gate
+// is opt-in rather than implicit, and a stray key in the environment does not
+// trigger real network traffic and spend.
 func skipIfNoAPIKey(t *testing.T) {
 	t.Helper()
+	if os.Getenv("RUN_LIVE_AI") != "1" {
+		t.Skip("RUN_LIVE_AI != 1 (set RUN_LIVE_AI=1 to enable live-API tests)")
+	}
 	if os.Getenv("CLAUDE_API_KEY") == "" {
 		t.Skip("CLAUDE_API_KEY not set")
 	}

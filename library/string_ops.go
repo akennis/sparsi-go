@@ -23,6 +23,8 @@ const AIComputeStringToStringOpDescription = `AIComputeStringToStringOp: AI-powe
             api_retry_delay_ms string — initial backoff delay in milliseconds (default "500").
             provider string — AI provider: "claude" (default) or "gemini".
             model string — model name passed through to the provider (default: "claude-sonnet-4-6").
+            credential_ref string — opaque credential identifier passed to AIClientFactory (default ""; ignored by the bundled env-var factory).
+            client_factory_id string — selects a registered AIClientFactory by id (default "" → process default).
   Inputs:   Input *string — the query string.
   Outputs:  Result string, Reasoning string.`
 

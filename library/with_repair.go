@@ -36,6 +36,8 @@ const WithRepairDescription = `WithRepair: AI-driven recovery wrapper around a d
              provider     string — AI provider: "claude" (default) or "gemini".
              model        string — model passed to the provider (default "claude-sonnet-4-6").
              max_tokens   string — LLM response token budget (default "2048").
+             credential_ref string — opaque credential identifier passed to AIClientFactory (default ""; ignored by the bundled env-var factory).
+             client_factory_id string — selects a registered AIClientFactory by id (default "" → process default).
              api_retries        — see provider-level retry settings.
   Inputs/Outputs: identical to the wrapped inner op — wire by the inner op's field names.`
 
@@ -174,7 +176,9 @@ func (op *withRepairOp[Inner]) Setup(params *config.Params) error {
 		return fmt.Errorf("WithRepair[%s]: %w", op.name, err)
 	}
 
-	caller, err := newAICaller(op.config.Provider, op.config.Model, parseRetryConfig(params))
+	credRef := params.GetString("credential_ref", "")
+	factoryID := params.GetString("client_factory_id", "")
+	caller, err := newAICaller(op.config.Provider, op.config.Model, credRef, factoryID, parseRetryConfig(params))
 	if err != nil {
 		return fmt.Errorf("WithRepair[%s]: %w", op.name, err)
 	}

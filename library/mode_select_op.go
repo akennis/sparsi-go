@@ -20,6 +20,8 @@ const ModeSelectOpDescription = `ModeSelectOp: AI-powered classifier — maps ar
             api_retry_delay_ms string — initial backoff delay in milliseconds (default "500").
             provider string — AI provider: "claude" (default) or "gemini".
             model string — model name passed through to the provider (default: "claude-sonnet-4-6").
+            credential_ref string — opaque credential identifier passed to AIClientFactory (default ""; ignored by the bundled env-var factory).
+            client_factory_id string — selects a registered AIClientFactory by id (default "" → process default).
   Inputs:   Input *string — the text to classify.
   Outputs:  Result string — exactly one of the specified categories.`
 
@@ -59,7 +61,9 @@ func (op *ModeSelectOp) Setup(params *config.Params) error {
 	}
 	op.provider = params.GetString("provider", "claude")
 	op.model = params.GetString("model", "claude-sonnet-4-6")
-	caller, err := newAICaller(op.provider, op.model, parseRetryConfig(params))
+	credRef := params.GetString("credential_ref", "")
+	factoryID := params.GetString("client_factory_id", "")
+	caller, err := newAICaller(op.provider, op.model, credRef, factoryID, parseRetryConfig(params))
 	if err != nil {
 		return fmt.Errorf("ModeSelectOp: %w", err)
 	}

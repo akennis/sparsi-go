@@ -274,6 +274,69 @@ func (r *MyResult) ExpectedFormat() string {
 }
 ```
 
+### Custom credential routing
+
+By default, AI ops read `CLAUDE_API_KEY` / `GEMINI_API_KEY` from the process environment. Teams that need to route credentials through Vault, AWS Secrets Manager, GCP Secret Manager, workload identity, or an egress proxy — or run a multi-tenant workflow where different vertices use different credentials — swap that path by implementing `library.AIClientFactory`:
+
+```go
+type AIClientFactory interface {
+    Anthropic(ctx context.Context, ref string) (*anthropic.Client, error)
+    Gemini(ctx context.Context, ref string) (*genai.Client, error)
+}
+```
+
+`ref` is opaque to the library — empty means "default". Implementations decide whether it is a Vault path, tenant id, region, or anything else. The factory returns a fully configured SDK client; the library never sees the API key.
+
+**Process-wide swap.** Register the factory once at startup and every AI op vertex uses it:
+
+```go
+import (
+    "github.com/akennis/clawdag-go/library"
+    "github.com/anthropics/anthropic-sdk-go"
+    "google.golang.org/genai"
+)
+
+type vaultFactory struct{ addr string }
+
+func (f *vaultFactory) Anthropic(ctx context.Context, ref string) (*anthropic.Client, error) {
+    key, err := fetchFromVault(ctx, f.addr, ref) // ref → vault path
+    if err != nil { return nil, err }
+    c := anthropic.NewClient(option.WithAPIKey(key))
+    return &c, nil
+}
+func (f *vaultFactory) Gemini(ctx context.Context, ref string) (*genai.Client, error) {
+    key, err := fetchFromVault(ctx, f.addr, ref)
+    if err != nil { return nil, err }
+    return genai.NewClient(ctx, &genai.ClientConfig{APIKey: key})
+}
+
+func main() {
+    library.SetDefaultAIClientFactory(&vaultFactory{addr: "https://vault.internal"})
+    // build graph, run engine ...
+}
+```
+
+**Per-vertex routing.** Register factories under string ids, then opt vertices in via the `client_factory_id` param. `credential_ref` is forwarded to the factory verbatim:
+
+```go
+library.RegisterAIClientFactory("tenant-a", &vaultFactory{addr: "https://vault.internal"})
+library.RegisterAIClientFactory("tenant-b", &awsFactory{region: "us-east-1"})
+
+graph.NewBuilder("multi_tenant").
+    Vertex("classify_a").Op("AIBoolOp").
+        Params(map[string]string{
+            "predicate":         "is this in English?",
+            "client_factory_id": "tenant-a",
+            "credential_ref":    "secret/tenant-a/anthropic",
+        }).
+        Input("Input", "text").
+        Output("Result", "is_english_a")
+```
+
+Vertices that omit `client_factory_id` fall back to the process-wide default factory. The bundled `EnvAIClientFactory` is the default when nothing is registered, so existing workflows keep working with no code change.
+
+Factories also serve as the seam for hermetic tests — see `library/ai_factory_test.go` for a recording-stub pattern that asserts ref propagation without any network traffic.
+
 ### Adding conditionals
 
 Register a named predicate and attach it to a vertex with `.Condition(...)`:
@@ -478,8 +541,11 @@ clawdag-go/
 
 | Variable | Purpose |
 |----------|---------|
-| `CLAUDE_API_KEY` | Required for AI library ops (the default provider) |
-| `GEMINI_API_KEY` | Required only for ops or examples that select `provider: "gemini"` |
+| `CLAUDE_API_KEY` | Required for AI library ops when using the default `EnvAIClientFactory` |
+| `GEMINI_API_KEY` | Required only for ops or examples that select `provider: "gemini"` (still with the default factory) |
+| `RUN_LIVE_AI=1` | Opt-in to live-API integration tests under `library/`; tests skip otherwise even when `CLAUDE_API_KEY` is set |
+
+Neither key is read when a custom `AIClientFactory` is registered — see [Custom credential routing](#custom-credential-routing).
 
 ## Dependencies
 

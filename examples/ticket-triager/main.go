@@ -5,6 +5,14 @@
 // category-specific extraction lane.  The four lanes run in parallel as DAG
 // branches; only the lane whose predicate matches actually fires, and its
 // per-lane JSON summary coalesces into a single final brief.
+//
+// AIClientFactory demo. Every AI vertex carries a `credential_ref` param
+// naming a "cost center" (triage, billing, bug, feature, other). A custom
+// library.AIClientFactory — costCenterFactory below — maps that ref onto an
+// env var (CLAUDE_API_KEY_<COSTCENTER>) so each team can be billed on its
+// own Anthropic API key. When a per-cost-center key is unset, the factory
+// falls back to CLAUDE_API_KEY so the demo still runs with the default
+// single-key setup.
 package main
 
 import (
@@ -16,7 +24,12 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
+	"google.golang.org/genai"
 
 	"github.com/akennis/clawdag-go/library"      // registers library ops
 	_ "github.com/wwz16/dagor/operator/builtin" // registers CoalesceNStringOp
@@ -304,6 +317,58 @@ func (op *EncodeOtherOp) ResetFields() {
 	op.Result = ""
 }
 
+// ─── AIClientFactory: per-cost-center billing ──────────────────────────────
+
+// costCenterFactory routes Anthropic traffic to a different API key based on
+// the credential_ref the AI vertex declares. The ref names a cost center; the
+// factory looks up CLAUDE_API_KEY_<COSTCENTER> and constructs the SDK client
+// with that key, so each business unit is billed on its own Anthropic account.
+//
+// Falls back to CLAUDE_API_KEY when the per-cost-center var is unset, so this
+// example still runs end-to-end with a single shared key.
+type costCenterFactory struct {
+	mu     sync.Mutex
+	cached map[string]*anthropic.Client
+}
+
+func (f *costCenterFactory) Anthropic(_ context.Context, ref string) (*anthropic.Client, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c, ok := f.cached[ref]; ok {
+		return c, nil
+	}
+
+	primary := "CLAUDE_API_KEY"
+	if ref != "" {
+		primary = "CLAUDE_API_KEY_" + strings.ToUpper(ref)
+	}
+	source := primary
+	key := os.Getenv(primary)
+	if key == "" && primary != "CLAUDE_API_KEY" {
+		source = "CLAUDE_API_KEY"
+		key = os.Getenv("CLAUDE_API_KEY")
+	}
+	if key == "" {
+		return nil, fmt.Errorf("costCenterFactory: no API key for cost center %q (looked at %s, then CLAUDE_API_KEY)", ref, primary)
+	}
+
+	slog.Info("ticket-triager.factory.resolve", "cost_center", ref, "env_var", source)
+
+	c := anthropic.NewClient(option.WithAPIKey(key))
+	if f.cached == nil {
+		f.cached = map[string]*anthropic.Client{}
+	}
+	f.cached[ref] = &c
+	return &c, nil
+}
+
+// Gemini is required by the AIClientFactory interface but unused here — this
+// example is Claude-only. Reaching this path means a misconfigured vertex
+// asked for Gemini against this factory; fail loud.
+func (f *costCenterFactory) Gemini(_ context.Context, _ string) (*genai.Client, error) {
+	return nil, fmt.Errorf("costCenterFactory: Gemini is not configured for ticket-triager")
+}
+
 func init() {
 	mustReg := func(name string, f func() operator.IOperator) {
 		if err := operator.RegisterOpFactory(name, f); err != nil {
@@ -350,8 +415,12 @@ func buildGraph() (*graph.Graph, error) {
 		Output("Result", "ticket_body").
 
 		// Classify into one of 4 categories via a single AI call.
+		// credential_ref="triage" → billed against CLAUDE_API_KEY_TRIAGE.
 		Vertex("classify").Op("ModeSelectOp").
-		Params(map[string]string{"categories": "billing,bug,feature,other"}).
+		Params(map[string]string{
+			"categories":     "billing,bug,feature,other",
+			"credential_ref": "triage",
+		}).
 		Input("Input", "ticket_body").
 		Output("Result", "ticket_category").
 
@@ -363,12 +432,18 @@ func buildGraph() (*graph.Graph, error) {
 		Output("BodyOut", "billing_body").
 
 		Vertex("billing_extract").Op("AIExtractMapOp").
-		Params(map[string]string{"operation": "extract these fields from the customer support email and return key=value pairs only: name, email, account_id, total_amount, charge_count"}).
+		Params(map[string]string{
+			"operation":      "extract these fields from the customer support email and return key=value pairs only: name, email, account_id, total_amount, charge_count",
+			"credential_ref": "billing",
+		}).
 		Input("Input", "billing_body").
 		Output("Result", "billing_map").
 
 		Vertex("billing_refund").Op("AIParseNumberOp").
-		Params(map[string]string{"operation": "the refund amount the customer is requesting in US dollars (a single number, no currency symbol)"}).
+		Params(map[string]string{
+			"operation":      "the refund amount the customer is requesting in US dollars (a single number, no currency symbol)",
+			"credential_ref": "billing",
+		}).
 		Input("Input", "billing_body").
 		Output("Result", "billing_refund_amount").
 
@@ -385,17 +460,26 @@ func buildGraph() (*graph.Graph, error) {
 		Output("BodyOut", "bug_body").
 
 		Vertex("bug_steps").Op("AIExtractStringSliceOp").
-		Params(map[string]string{"operation": "extract the reproduction steps from this bug report as a flat comma-separated list (one step per item)"}).
+		Params(map[string]string{
+			"operation":      "extract the reproduction steps from this bug report as a flat comma-separated list (one step per item)",
+			"credential_ref": "bug",
+		}).
 		Input("Input", "bug_body").
 		Output("Result", "bug_repro_steps").
 
 		Vertex("bug_severity").Op("AIScoreOp").
-		Params(map[string]string{"criterion": "severity and urgency of the reported bug, where 1.0 means production-blocking and 0.0 means cosmetic"}).
+		Params(map[string]string{
+			"criterion":      "severity and urgency of the reported bug, where 1.0 means production-blocking and 0.0 means cosmetic",
+			"credential_ref": "bug",
+		}).
 		Input("Input", "bug_body").
 		Output("Result", "bug_severity_score").
 
 		Vertex("bug_regression").Op("AIBoolOp").
-		Params(map[string]string{"predicate": "does the report indicate this bug is a regression — that this functionality previously worked and recently broke?"}).
+		Params(map[string]string{
+			"predicate":      "does the report indicate this bug is a regression — that this functionality previously worked and recently broke?",
+			"credential_ref": "bug",
+		}).
 		Input("Input", "bug_body").
 		Output("Result", "bug_is_regression").
 
@@ -413,12 +497,18 @@ func buildGraph() (*graph.Graph, error) {
 		Output("BodyOut", "feature_body").
 
 		Vertex("feature_summary").Op("AIComputeStringToStringOp").
-		Params(map[string]string{"operation": "summarize the feature being requested in one concise sentence"}).
+		Params(map[string]string{
+			"operation":      "summarize the feature being requested in one concise sentence",
+			"credential_ref": "feature",
+		}).
 		Input("Input", "feature_body").
 		Output("Result", "feature_description").
 
 		Vertex("feature_impact").Op("AIScoreOp").
-		Params(map[string]string{"criterion": "business impact of building this feature, where 1.0 is critical to many users and 0.0 is purely cosmetic"}).
+		Params(map[string]string{
+			"criterion":      "business impact of building this feature, where 1.0 is critical to many users and 0.0 is purely cosmetic",
+			"credential_ref": "feature",
+		}).
 		Input("Input", "feature_body").
 		Output("Result", "feature_business_impact").
 
@@ -435,7 +525,10 @@ func buildGraph() (*graph.Graph, error) {
 		Output("BodyOut", "other_body").
 
 		Vertex("other_ack").Op("AIComputeStringToStringOp").
-		Params(map[string]string{"operation": "write a polite, brief one-paragraph acknowledgement of this customer email"}).
+		Params(map[string]string{
+			"operation":      "write a polite, brief one-paragraph acknowledgement of this customer email",
+			"credential_ref": "other",
+		}).
 		Input("Input", "other_body").
 		Output("Result", "other_acknowledgement").
 
@@ -479,6 +572,11 @@ func main() {
 	}
 
 	registerPredicates()
+
+	// Route every AI op through the per-cost-center factory so each vertex's
+	// credential_ref param maps onto its own CLAUDE_API_KEY_<COSTCENTER> env
+	// var. Must happen before the engine runs Setup() on any AI op.
+	library.SetDefaultAIClientFactory(&costCenterFactory{})
 
 	g, err := buildGraph()
 	if err != nil {

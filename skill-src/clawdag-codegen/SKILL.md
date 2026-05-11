@@ -296,6 +296,63 @@ follow-up turn.
 Use this **instead of** wrapping an AI op with `WithRepair`. Reserve
 `WithRepair` for *deterministic* ops at the input boundary (see above).
 
+## AIClientFactory — optional enterprise credential routing
+
+Every AI op sources its SDK client from a `library.AIClientFactory`. The default
+(`library.EnvAIClientFactory`) reads `CLAUDE_API_KEY` / `GEMINI_API_KEY` from the
+process environment. **Do not** emit factory wiring unless the approved design
+explicitly calls for non-env credentials (Vault, Secrets Manager, workload
+identity, multi-tenant routing, egress proxy). When in doubt, omit it.
+
+Two patterns appear in designs that require it:
+
+**Process-wide factory.** A single factory used by every AI op. Register once
+in `main()` BEFORE building the graph:
+
+```go
+func main() {
+    library.SetDefaultAIClientFactory(&vaultFactory{addr: os.Getenv("VAULT_ADDR")})
+    // ... pool, buildGraph, eng.Run ...
+}
+```
+
+**Per-vertex factory.** Multiple factories selected per-vertex via the
+`client_factory_id` param. Register named factories in `main()`:
+
+```go
+library.RegisterAIClientFactory("tenant-a", &tenantFactory{tenant: "a"})
+library.RegisterAIClientFactory("tenant-b", &tenantFactory{tenant: "b"})
+```
+
+Then the design supplies `client_factory_id` and `credential_ref` as vertex
+params:
+
+```go
+Vertex("classify").Op("AIBoolOp").
+    Params(map[string]string{
+        "predicate":         "is this text spam?",
+        "client_factory_id": "tenant-a",                  // selects registered factory
+        "credential_ref":    "secret/tenant-a/anthropic", // forwarded verbatim
+    }).
+    Input("Input", "ticket_text").
+    Output("Result", "is_spam")
+```
+
+Rules:
+- `credential_ref` is opaque to the library — the factory decides what it means
+  (Vault path, tenant id, region). Empty = factory default.
+- `client_factory_id` is optional; omit it on vertices that should use the
+  process default.
+- The factory type must be defined in `main.go` (or a sibling file in
+  `<output_dir>/`) and implement both `Anthropic(ctx, ref)` and
+  `Gemini(ctx, ref)` methods returning `*anthropic.Client` / `*genai.Client`.
+- Use the named import `clawdag "github.com/akennis/clawdag-go/library"` (or
+  `library`) to call `SetDefaultAIClientFactory` / `RegisterAIClientFactory`.
+
+When the design does NOT mention enterprise credential routing, generate code
+exactly as before — no factory imports, no registration in `main()`, no
+`credential_ref` / `client_factory_id` on vertices.
+
 ## AI recovery wrapper (WithRepair)
 When a deterministic op may fail on structurally-fixable bad input (malformed JSON,
 near-miss enum, missing field, schema-violating record), wrap it via

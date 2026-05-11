@@ -58,6 +58,42 @@ out the validation rules — codegen translates each rule into one
 
 Do not add a separate `[AI:WithRepair]` vertex for any of these.
 
+# AIClientFactory params (optional — enterprise credential routing)
+
+Every AI op sources its SDK client from a `library.AIClientFactory`. The default
+(`library.EnvAIClientFactory`) reads `CLAUDE_API_KEY` / `GEMINI_API_KEY` from the
+process environment. Two optional vertex params let a workflow opt into a
+different credential source:
+
+- `credential_ref` — opaque string forwarded to the configured factory (Vault
+  path, tenant id, region, anything the implementation maps onto a credential).
+- `client_factory_id` — selects a named factory registered in `main()`;
+  vertices that omit it fall back to the process-wide default.
+
+Include these params in the design **only** when the task explicitly involves:
+
+- Multi-tenant routing where different vertices need different credentials.
+- Non-env credential sources (Vault, AWS Secrets Manager, GCP Secret Manager,
+  Azure Key Vault, workload identity, egress proxy).
+- Per-vertex credential rotation policy.
+
+Single-tenant workflows that "just need to call Claude" must NOT mention these
+params — leave the default factory in place. Adding them speculatively forces
+codegen to write unnecessary registration plumbing in `main()`.
+
+When relevant, list them in the vertex's **Params** line alongside `provider` /
+`model`, and note in **Design Rationale** which `main()`-side wiring is required
+(one of `SetDefaultAIClientFactory` for a process-wide swap or
+`RegisterAIClientFactory("<id>", …)` for each named factory).
+
+Example vertex line for a multi-tenant design:
+
+```
+3. **classify_tenant_a** — `AIBoolOp` — Params: predicate="is this in English?", client_factory_id="tenant-a", credential_ref="secret/tenant-a/anthropic"
+   - In: Input ← `text_a`
+   - Out: Result → `is_english_a`
+```
+
 # Steps
 
 1. Read `references/library.md` and identify every op that is relevant to the task.
