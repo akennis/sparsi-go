@@ -205,6 +205,28 @@ Do NOT use the `[AI:...]` suffix on plain AI ops (`AIBoolOp`, `AIScoreOp`,
 The suffix is reserved for ops that wrap another op, because only the wrapped
 form risks an audit confusion about whether the LLM is in the path.
 
+# EXTERNAL CONTEXT — RETRIEVAL (RAG)
+When the workflow needs facts that are not in the user's input and cannot be hardcoded — a product
+knowledge base, past tickets, current documentation, a vector store — fan in retrieved context via
+`RetrieveOp`. The Go program registers a `library.Retriever` implementation (BM25, vector DB, hosted
+search, whatever) via `library.SetDefaultRetriever` before running the engine; the DAG sees a single
+op with `Query *string` input and `Documents []library.Document` + `Texts []string` outputs.
+
+Wire the `Texts` output (`[]string`, parallel to `Documents[i].Content` in best-first order) into the
+downstream AI op — it plugs directly into `AISummarizeOp` / `AIRerankOp` / `AIBestMatchOp.Candidates`,
+or into a small custom op that joins it with the user's question for a string→string answer step.
+Use the `Documents` output only when downstream logic needs the per-document ID or relevance score
+(e.g. showing citations, gating on a minimum score). RetrieveOp params: `k` (default `"5"`) and an
+optional `retriever_id` for multi-backend setups.
+
+When the retrieval needs to be **scoped by values produced upstream in the DAG** — a tenant id from
+an auth step, a category from a classifier, a date range from a planner — use `RetrieveWithFiltersOp`
+instead. It adds one input wire (`Filters *map[string]string`) and installs the filters into ctx for
+the Retriever to consume. The Retriever implementation owns interpretation; document what keys it
+understands. Build the filter map upstream with a small custom op (or by chaining string ops) and
+wire it in. Use plain `RetrieveOp` when the retrieval has no per-request scoping — don't reach for
+`RetrieveWithFiltersOp` just because it exists.
+
 # AVAILABLE LIBRARY OPS:
 {{LIBRARY_DESCRIPTION}}
 

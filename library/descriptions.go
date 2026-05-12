@@ -107,6 +107,7 @@ func AllDescriptions() string {
 		}},
 		{"## Retrieval", []string{
 			RetrieveOpDescription,
+			RetrieveWithFiltersOpDescription,
 		}},
 		{"## AI", []string{
 			ModeSelectOpDescription,
