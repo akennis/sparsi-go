@@ -50,4 +50,5 @@
 //go:generate daggen -type=DefaultStringOp -output=select_defaultstring_gen.go
 //go:generate daggen -type=DefaultFloat64Op -output=select_defaultfloat64_gen.go
 //go:generate daggen -type=DefaultIntOp -output=select_defaultint_gen.go
+//go:generate daggen -type=RetrieveOp -output=retrieve_op_gen.go
 package library

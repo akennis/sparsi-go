@@ -1,0 +1,6 @@
+If you have forgotten your Tessera account password, tap "Forgot password"
+on the sign-in screen. We will email a one-time reset link to the address
+on file. The link expires after 60 minutes. If you no longer have access to
+that email, contact support@tessera.example with your order number and a
+photo of the device's serial number sticker; we can verify ownership and
+move the account to a new address.

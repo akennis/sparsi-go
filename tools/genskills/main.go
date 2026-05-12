@@ -33,6 +33,7 @@ var exampleDirs = []string{
 	"local-mcp-server",
 	"remote-mcp-server",
 	"with-repair",
+	"rag-bm25",
 }
 
 func main() {

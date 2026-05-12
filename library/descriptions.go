@@ -105,6 +105,9 @@ func AllDescriptions() string {
 			SliceFilterEqOpDescription,
 			SliceTopKOpDescription,
 		}},
+		{"## Retrieval", []string{
+			RetrieveOpDescription,
+		}},
 		{"## AI", []string{
 			ModeSelectOpDescription,
 			AIComputeStringToStringOpDescription,
