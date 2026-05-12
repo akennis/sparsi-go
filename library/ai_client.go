@@ -38,15 +38,18 @@ type aiCaller interface {
 	call(ctx context.Context, req aiCallRequest) (aiCallResult, error)
 }
 
-// retryConfig controls exponential backoff for transient API errors.
+// retryConfig controls exponential backoff for transient API errors during
+// Run, and the deadline applied to factory credential lookup at Setup.
 type retryConfig struct {
-	maxRetries     int   // max retry attempts (default 3)
-	initialDelayMs int64 // starting delay in ms (default 500)
+	maxRetries     int           // max retry attempts (default 3)
+	initialDelayMs int64         // starting delay in ms (default 500)
+	factoryTimeout time.Duration // deadline for AIClientFactory credential lookup (default 30s; <=0 disables)
 }
 
-// parseRetryConfig reads api_retries and api_retry_delay_ms from vertex params.
+// parseRetryConfig reads api_retries, api_retry_delay_ms, and
+// api_factory_timeout_ms from vertex params.
 func parseRetryConfig(params *config.Params) retryConfig {
-	cfg := retryConfig{maxRetries: 3, initialDelayMs: 500}
+	cfg := retryConfig{maxRetries: 3, initialDelayMs: 500, factoryTimeout: 30 * time.Second}
 	if s := params.GetString("api_retries", ""); s != "" {
 		if n, err := strconv.Atoi(s); err == nil {
 			cfg.maxRetries = n
@@ -55,6 +58,11 @@ func parseRetryConfig(params *config.Params) retryConfig {
 	if s := params.GetString("api_retry_delay_ms", ""); s != "" {
 		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
 			cfg.initialDelayMs = n
+		}
+	}
+	if s := params.GetString("api_factory_timeout_ms", ""); s != "" {
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			cfg.factoryTimeout = time.Duration(n) * time.Millisecond
 		}
 	}
 	return cfg
@@ -68,6 +76,11 @@ func parseRetryConfig(params *config.Params) retryConfig {
 func newAICaller(provider, model, ref, factoryID string, cfg retryConfig) (aiCaller, error) {
 	factory := resolveFactory(factoryID)
 	ctx := context.Background()
+	if cfg.factoryTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.factoryTimeout)
+		defer cancel()
+	}
 	var inner aiCaller
 	switch provider {
 	case "claude":

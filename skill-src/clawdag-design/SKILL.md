@@ -69,6 +69,11 @@ different credential source:
   path, tenant id, region, anything the implementation maps onto a credential).
 - `client_factory_id` — selects a named factory registered in `main()`;
   vertices that omit it fall back to the process-wide default.
+- `api_factory_timeout_ms` — deadline applied to the factory credential lookup
+  at Setup, in milliseconds (default `"30000"`). Set this when the factory does
+  network I/O (Vault, Secrets Manager, KMS) and you want a tighter or looser
+  bound; set `"0"` to disable the deadline. Omit it for the default env-var
+  factory — the cap there is harmless but adds no value.
 
 Include these params in the design **only** when the task explicitly involves:
 

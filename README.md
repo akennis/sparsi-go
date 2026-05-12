@@ -287,6 +287,8 @@ type AIClientFactory interface {
 
 `ref` is opaque to the library — empty means "default". Implementations decide whether it is a Vault path, tenant id, region, or anything else. The factory returns a fully configured SDK client; the library never sees the API key.
 
+The `ctx` passed to factory methods is bounded by an op-level deadline (default 30 s) so credential lookups can't hang the workflow at Setup. Factories that do network I/O must honor `ctx.Done()`. Override the deadline per vertex with the `api_factory_timeout_ms` param (string, ms; `"0"` disables).
+
 **Process-wide swap.** Register the factory once at startup and every AI op vertex uses it:
 
 ```go

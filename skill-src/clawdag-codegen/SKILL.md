@@ -346,6 +346,11 @@ Rules:
 - The factory type must be defined in `main.go` (or a sibling file in
   `<output_dir>/`) and implement both `Anthropic(ctx, ref)` and
   `Gemini(ctx, ref)` methods returning `*anthropic.Client` / `*genai.Client`.
+  Both methods receive a context bounded by `api_factory_timeout_ms` (default
+  30 s); factories that do network I/O MUST honor `ctx.Done()`.
+- `api_factory_timeout_ms` is an optional vertex param (string, ms) that caps
+  the factory credential lookup at Setup; emit it only when the design's
+  vertex line specifies it. `"0"` disables the deadline.
 - Use the named import `clawdag "github.com/akennis/clawdag-go/library"` (or
   `library`) to call `SetDefaultAIClientFactory` / `RegisterAIClientFactory`.
 

@@ -18,6 +18,7 @@ const ModeSelectOpDescription = `ModeSelectOp: AI-powered classifier — maps ar
             max_retries string — parse/validation retries (default "3").
             api_retries string — transient-error retries with exponential backoff (default "3").
             api_retry_delay_ms string — initial backoff delay in milliseconds (default "500").
+            api_factory_timeout_ms string — deadline for AIClientFactory credential lookup in milliseconds (default "30000"; "0" disables).
             provider string — AI provider: "claude" (default) or "gemini".
             model string — model name passed through to the provider (default: "claude-sonnet-4-6").
             credential_ref string — opaque credential identifier passed to AIClientFactory (default ""; ignored by the bundled env-var factory).
