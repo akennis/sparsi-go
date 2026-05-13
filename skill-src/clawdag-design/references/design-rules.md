@@ -32,6 +32,9 @@ Canonical AI-appropriate examples:
 5. Any operation whose correct output is the same for a given input every time.
 6. Any branching or routing based on known categories — use predicates and conditions.
 
+# DETERMINISTIC OPS — PARAMETERS
+When using deterministic ops that require parameters (e.g. `path` for `FileReadOp`, `command` for `MCPCallOp`, `url` for `HTTPGetOp`), ensure these parameters are grounded in the user's request. If the user hasn't specified them, ASK for them (and whether they should be hardcoded or runtime inputs) before or during the design presentation. Do NOT use mock values like "example.com", "test.txt", or "mock_data" in the final approved design.
+
 # NUMERIC TYPE DISCIPLINE
 The library provides parallel `int` and `float64` variants for every standard math operation. Numbers
 must stay in their original type until a type conversion is genuinely required by a downstream op.

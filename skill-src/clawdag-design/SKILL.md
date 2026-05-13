@@ -349,15 +349,28 @@ and routing key (`credential_ref`) need to vary. List every factory id
 used in **Design Rationale** so codegen emits the matching
 `RegisterAIClientFactory` calls in `main()`.
 
+# Eliciting Missing Data Sources
+
+If the user's task implies the use of external data (files, URLs, MCP tools, databases) but does not provide specific details (e.g., paths, commands, retriever names), you MUST NOT invent placeholders or assume they should always be runtime inputs.
+
+Instead:
+1. Identify the missing data sources.
+2. Ask the user for the specifics (e.g., "What is the path to the file you want to analyze?", "What is the command and arguments for the MCP server?").
+3. Ask if the source should be a **hardcoded constant** (fixed for all runs) or a **runtime input** (different every time).
+
+Do this before or as part of presenting your initial design.
+
 # Steps
 
 1. Read `references/library.md` and identify every op that is relevant to the task.
 2. Read `references/design-rules.md` fully — especially the BRANCHING and BOOLEAN SELECTION sections.
-3. Select the structurally closest example from `references/examples/README.md` and read it.
-4. Draft a complete DAG design in the output format below.
-5. Present the design to the user. Ask: "Does this design look right? Any changes before I hand it to codegen?"
-6. If the user provides feedback, incorporate it and redraft. Repeat until explicit approval.
-7. The final approved design is the output — do not proceed to code generation.
+3. **Identify missing data sources:** Check if the task requires files, URLs, or external tools that aren't specified.
+4. **Ask for clarification:** If sources are missing, ask the user for details and whether they should be hardcoded or runtime inputs.
+5. Select the structurally closest example from `references/examples/README.md` and read it.
+6. Draft a complete DAG design in the output format below.
+7. Present the design to the user. Ask: "Does this design look right? Any changes before I hand it to codegen?"
+8. If the user provides feedback, incorporate it and redraft. Repeat until explicit approval.
+9. The final approved design is the output — do not proceed to code generation.
 
 # Refinement loop
 
