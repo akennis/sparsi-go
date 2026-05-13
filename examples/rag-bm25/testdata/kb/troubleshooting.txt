@@ -1,0 +1,7 @@
+If your Tessera thermostat display is blank, first check that the breaker
+for your HVAC system is on. If the breaker is on but the screen is still
+blank, the C-wire may not be delivering power; switch to the included
+plug-in adapter and confirm the screen lights up. If Wi-Fi drops repeatedly,
+move your router closer or add a mesh node — Tessera connects on 2.4 GHz
+only. If pairing fails partway through, factory-reset by holding the front
+button for 15 seconds and start again from the app.

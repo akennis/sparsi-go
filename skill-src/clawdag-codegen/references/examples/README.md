@@ -1,17 +1,27 @@
 # Example Index
 
+Each example is a directory under `references/examples/<name>/`. Most contain a
+single `main.go`; a few split the implementation across sibling files (e.g.
+`rag-bm25/bm25.go` defines the Retriever type referenced from `main.go`). When
+you pick an example, read **every** `.go` file in its directory before relying
+on the pattern — the file at `<name>/main.go` alone may reference types defined
+in a sibling file.
+
 Read the example whose structural pattern most closely matches the workflow you are designing.
 
-| Structural pattern | Example file |
+| Structural pattern | Example directory |
 |---|---|
-| Multi-lane text classification (free-form input → category → per-lane extraction → coalesce) | `ticket-triager.go` |
-| Extraction pipeline + deterministic numeric scoring (parse fields → hardcoded scoring → format) | `recipe-analyzer.go` |
-| Parallel HTTP fetch + status-code fallback + multi-probe scoring (dual GET → select → AI probes) | `readme-quality.go` |
-| Data parsing + band routing + conditional warning probes (parse → threshold predicates → coalesce + SelectStringOp) | `weather-advisor.go` |
-| MapOver fan-out + aggregation + routing (slice → map node → per-item sub-graph → collect → summarize) | `hn-topic-brief.go` |
-| Cross-model verification (Claude generates, Gemini independently checks faithfulness) | `faithful-summary.go` |
-| Scripted multi-call MCP session (one DAG step holds a long-lived MCP session and issues N tool calls in sequence; per-URL screenshot fan-out via MapOver + warm-replenish pool) | `local-mcp-server.go` |
-| Single MCP tool call against a remote (HTTP) MCP server (declare a concrete MCPCallOp variant, point it at a streamable HTTP endpoint) | `remote-mcp-server.go` |
+| Multi-lane text classification (free-form input → category → per-lane extraction → coalesce) | `ticket-triager/` |
+| Extraction pipeline + deterministic numeric scoring (parse fields → hardcoded scoring → format) | `recipe-analyzer/` |
+| Parallel HTTP fetch + status-code fallback + multi-probe scoring (dual GET → select → AI probes) | `readme-quality/` |
+| Data parsing + band routing + conditional warning probes (parse → threshold predicates → coalesce + SelectStringOp) | `weather-advisor/` |
+| MapOver fan-out + aggregation + routing (slice → map node → per-item sub-graph → collect → summarize) | `hn-topic-brief/` |
+| Cross-model verification (Claude generates, Gemini independently checks faithfulness) | `faithful-summary/` |
+| Scripted multi-call MCP session (one DAG step holds a long-lived MCP session and issues N tool calls in sequence; per-URL screenshot fan-out via MapOver + warm-replenish pool) | `local-mcp-server/` |
+| Single MCP tool call against a remote (HTTP) MCP server (declare a concrete MCPCallOp variant, point it at a streamable HTTP endpoint) | `remote-mcp-server/` |
+| AI-driven repair around deterministic ops (parse/validate op returns *ErrRepairable; WithRepair wrapper sends the prompt to the LLM, parses the response back via UnmarshalRepair, and re-runs the inner op) | `with-repair/` |
+| Retrieval-augmented generation over a local knowledge base with lexical BM25 retriever + source-file citations (load docs → RetrieveOp k=3 → BuildRAGPromptOp + AIComputeStringToStringOp → ParseCitationsOp) | `rag-bm25/` |
+| Retrieval-augmented generation with a vector-store-backed Retriever using Gemini embeddings + cosine similarity, demonstrating EmbeddingClientFactory credential plumbing (per-vertex credential_ref / client_factory_id routing on RetrieveOp) | `rag-gemini-embed/` |
 
 ## Quick-reference guidance
 

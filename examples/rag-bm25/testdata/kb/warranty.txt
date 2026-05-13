@@ -1,0 +1,6 @@
+Every Tessera thermostat is covered by a two-year limited warranty against
+manufacturing defects. The warranty covers the device itself, the wall plate,
+and the included USB-C cable. It does not cover damage from drops, improper
+wiring, power surges, or use with incompatible HVAC systems. Warranty claims
+require the original order number; contact support@tessera.example to start
+a claim. Approved warranty replacements ship free of charge.

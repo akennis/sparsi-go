@@ -3,6 +3,7 @@ package library
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -177,5 +178,51 @@ func TestEnvAIClientFactory_AnthropicCachesByRef(t *testing.T) {
 	}
 	if a1 != a2 {
 		t.Fatalf("expected cached identical *anthropic.Client across calls; got %p vs %p", a1, a2)
+	}
+}
+
+// TestEnvAIClientFactory_WarnsOnceWhenRefIgnored asserts the bundled factory
+// logs exactly one warning per ref when a caller passes a non-empty ref —
+// since the factory ignores ref and uses CLAUDE_API_KEY/GEMINI_API_KEY only,
+// silently routing two different refs to the same env key is the surprise
+// the warning guards against. The second resolution of the same ref must
+// NOT re-log (cache hit dedupes).
+func TestEnvAIClientFactory_WarnsOnceWhenRefIgnored(t *testing.T) {
+	buf := captureSlog(t)
+	f := &EnvAIClientFactory{}
+	// First call with ref=A: warn fires.
+	if _, err := f.Anthropic(context.Background(), "tenant-a"); err != nil {
+		t.Fatalf("Anthropic: %v", err)
+	}
+	// Second call with same ref=A: cache hit, no warn.
+	if _, err := f.Anthropic(context.Background(), "tenant-a"); err != nil {
+		t.Fatalf("Anthropic: %v", err)
+	}
+	out := buf.String()
+	n := strings.Count(out, "EnvAIClientFactory: ref=")
+	if n != 1 {
+		t.Fatalf("expected exactly 1 warning across two same-ref resolutions, got %d; log:\n%s", n, out)
+	}
+	// The msg field interpolates ref=%q, which renders as ref=\"tenant-a\"
+	// (escaped) inside the quoted msg attribute.
+	if !strings.Contains(out, `ref=\"tenant-a\"`) {
+		t.Fatalf("warning msg should include ref=\"tenant-a\"; log:\n%s", out)
+	}
+	if !strings.Contains(out, "CLAUDE_API_KEY") {
+		t.Fatalf("warning should mention CLAUDE_API_KEY for the anthropic path; log:\n%s", out)
+	}
+}
+
+// TestEnvAIClientFactory_SilentWhenRefEmpty asserts the warning is NOT
+// emitted for the documented "use env defaults" path (ref==""), which is
+// the steady state for almost all callers.
+func TestEnvAIClientFactory_SilentWhenRefEmpty(t *testing.T) {
+	buf := captureSlog(t)
+	f := &EnvAIClientFactory{}
+	if _, err := f.Anthropic(context.Background(), ""); err != nil {
+		t.Fatalf("Anthropic: %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "EnvAIClientFactory: ref=") {
+		t.Fatalf("expected no warning when ref==\"\"; got:\n%s", got)
 	}
 }

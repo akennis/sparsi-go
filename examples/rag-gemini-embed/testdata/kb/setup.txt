@@ -1,0 +1,7 @@
+To pair a new Tessera thermostat with the mobile app, first install the app
+from the App Store or Google Play and create an account. Power the
+thermostat by mounting it on the wall plate. Open the app, tap Add Device,
+and follow the on-screen prompts to scan the QR code on the back of the unit.
+Pairing uses Bluetooth Low Energy and typically completes in under a minute.
+After pairing, the app will prompt you to connect the thermostat to your
+home Wi-Fi network.

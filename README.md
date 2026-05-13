@@ -52,7 +52,7 @@ func main() {
 }
 ```
 
-For real workflows, see the [`examples/`](examples/) directory — six end-to-end programs that cover classification, scoring, parallel fan-out, MapOver, and cross-model verification.
+For real workflows, see the [`examples/`](examples/) directory — twelve end-to-end programs that cover classification, scoring, parallel fan-out, MapOver, cross-model verification, MCP tool calls, AI-assisted repair, and retrieval-augmented generation.
 
 ## Philosophy
 
@@ -76,18 +76,38 @@ Workflows are DAGs built from operators (ops). Each op is a Go struct with `dag:
 |----|------|-------------|
 | `ContextValOp[T]` (via `ContextValFactory`) | deterministic | Reads a typed value from `context.Context` at run time — see [Injecting values](#injecting-values) |
 | `ConstOp[T]` (via `RegisterConst`) | deterministic | Emits a fixed Go value captured at registration — use for truly static constants |
-| **Math** | | |
-| `AddOp` | deterministic | A + B (`float64`) |
-| `SubOp` | deterministic | A − B (`float64`) |
-| `MulOp` | deterministic | A × B (`float64`) |
-| `DivOp` | deterministic | A ÷ B — errors on zero divisor |
+| **Math — float64** | | |
+| `AddFloatOp` | deterministic | A + B (`float64`) |
+| `SubFloatOp` | deterministic | A − B (`float64`) |
+| `MulFloatOp` | deterministic | A × B (`float64`) |
+| `DivFloatOp` | deterministic | A ÷ B (`float64`) — errors on zero divisor |
+| `PowFloatOp` | deterministic | A ^ B (`float64`) |
+| `ModFloatOp` | deterministic | `math.Mod(A, B)` |
 | `RoundOp` | deterministic | Rounds a `float64` to nearest integer |
-| `ClampOp` | deterministic | Clamps Value to [Min, Max] |
-| `SumOp` | deterministic | Sums a `[]float64` slice |
-| `MinOp` | deterministic | Minimum of a `[]float64` slice |
-| `MaxOp` | deterministic | Maximum of a `[]float64` slice |
+| `ClampFloatOp` | deterministic | Clamps `float64` Value to [Min, Max] |
+| `SumFloatOp` | deterministic | Sums a `[]float64` slice |
+| `MinFloatOp` | deterministic | Minimum of a `[]float64` slice |
+| `MaxFloatOp` | deterministic | Maximum of a `[]float64` slice |
 | `PackMathOperandsOp` | deterministic | Packs two `float64` inputs into a `MathOperands` struct |
 | `AIComputeMathOperandsToFloat64Op` | AI | Performs any binary float64 operation (e.g. multiply) via the AI provider |
+| **Math — int** | | |
+| `AddIntOp` | deterministic | A + B (`int`) |
+| `SubIntOp` | deterministic | A − B (`int`) |
+| `MulIntOp` | deterministic | A × B (`int`) |
+| `DivIntOp` | deterministic | A ÷ B (`int`) — errors on zero divisor |
+| `PowIntOp` | deterministic | A ^ B (`int`) |
+| `ModIntOp` | deterministic | A % B (`int`) |
+| `ClampIntOp` | deterministic | Clamps `int` Value to [Min, Max] |
+| `SumIntOp` | deterministic | Sums an `[]int` slice |
+| `MinIntOp` | deterministic | Minimum of an `[]int` slice |
+| `MaxIntOp` | deterministic | Maximum of an `[]int` slice |
+| **Casts** | | |
+| `IntToFloat64Op` | deterministic | `int` → `float64` |
+| `Float64ToIntOp` | deterministic | `float64` → `int` (truncation) |
+| `Float64ToStringOp` | deterministic | `*float64` → `string` via `%v` |
+| `IntToStringOp` | deterministic | `*int` → `string` via `%v` |
+| `BoolToStringOp` | deterministic | `*bool` → `"true"` / `"false"` |
+| `ToStringOp` | deterministic | Reflection-based `any` → `string` for custom struct wires |
 | **Strings** | | |
 | `StringConcatOp` | deterministic | Concatenates two strings |
 | `StringToLowerOp` | deterministic | Lowercases a string |
@@ -151,6 +171,10 @@ Workflows are DAGs built from operators (ops). Each op is a Go struct with `dag:
 | **MCP / external tools** | | |
 | `MCPCallOp[In, Out]` | external | Generic single-call MCP tool wrapper. Embed in a concrete struct with typed In/Out and register the subclass. Optional warm-replenish pool via `pool_size` |
 | `MCPScriptOp[In, Out]` | external | Generic multi-call MCP scripted session — one DAG step makes many tool calls that share server-side state (browser, file handles). Embed + register. Optional warm-replenish pool via `pool_size` |
+| **Retrieval (RAG)** | | |
+| `RetrieveOp` | external | Pulls top-k `library.Document` records from a registered `library.Retriever`. Outputs `Documents []library.Document` and a parallel `Texts []string`. See [Retrieval](#retrieval) |
+| `RetrieveWithFiltersOp` | external | Like `RetrieveOp` but with a `Filters *map[string]string` input wire and a `static_filters` param; merged map is installed on `ctx` for the Retriever to consume |
+| `ValidateCitationsOp` | deterministic | Filters LLM-emitted citations against an allow-list of source identifiers (typically `RetrieveOp.Documents` extracted to `[]string`); drops hallucinated entries into `Rejected` so they can be logged without reaching downstream surfaces |
 | **AI ops** | | |
 | `ModeSelectOp` | AI | Classifies input text into one of a fixed set of categories |
 | `AIBoolOp` | AI | Yes/no predicate about input text |
@@ -199,6 +223,46 @@ Vertex("classify").Op("ModeSelectOp").
     Input("Input", "user_input").
     Output("Result", "input_mode").
 ```
+
+### Retrieval
+
+`RetrieveOp` fans external context into a graph via a registered `library.Retriever`. The interface has one method:
+
+```go
+type Retriever interface {
+    Retrieve(ctx context.Context, query string, k int) ([]library.Document, error)
+}
+```
+
+Register an implementation before running the engine:
+
+```go
+library.SetDefaultRetriever(NewMyRetriever(corpus))             // process default
+library.RegisterRetriever("kb-public", NewPublicKBRetriever(...)) // named, opt-in via retriever_id param
+```
+
+Each `library.Document` carries `{ID, Content, Score, Metadata}`. The framework passes `Metadata` (a `map[string]any`) through unchanged; downstream ops type-assert the keys they care about. The library exports constants for the metadata keys the bundled examples use:
+
+| Constant | Value | Convention |
+|---|---|---|
+| `library.MetadataSource` | `"source"` | human-readable source identifier (filename, document title) |
+| `library.MetadataSourceURL` | `"source_url"` | canonical URL for clickable citations |
+| `library.MetadataHighlights` | `"highlights"` | matched snippets, typically `[]string` |
+| `library.MetadataUpdatedAt` | `"updated_at"` | last-modified `time.Time` |
+
+`RetrieveOp` outputs both `Documents []library.Document` and a parallel `Texts []string` (the convenience wire that plugs directly into AI ops taking `*[]string`). Use `RetrieveWithFiltersOp` when retrieval needs to be scoped by per-request values: it accepts a `Filters *map[string]string` input wire and/or a `static_filters` param (comma-separated `key=value` pairs); the merged map is installed into `ctx` and retrieved by Retriever implementations via `library.RetrievalFiltersFromContext`.
+
+**Citation re-validation.** When the model emits citations alongside an answer, treat the parsed list as untrusted: an LLM can hallucinate filenames that were never in the retrieved corpus. Wire `ValidateCitationsOp` between the citation parser and any downstream surface (logger, audit record, file reader) — it filters citations against an allow-list (typically the `library.MetadataSource` values of the retrieved documents) and emits `Accepted` / `Rejected` slices. See `examples/rag-bm25/` for the canonical wiring.
+
+**Vector-store retrievers — embedding credentials.** Retrievers that embed the query (pgvector, Pinecone, sqlite-vec, hosted search) call `library.ResolveEmbeddingClient(ctx, provider, model)` rather than reading embedding env vars directly. The sibling `library.EmbeddingClientFactory` interface mirrors `AIClientFactory`; the bundled `EnvEmbeddingClientFactory` supports only `provider="gemini"` (reads `GEMINI_API_KEY`). For any other embedder (Voyage, OpenAI, Cohere, Vertex, …) register a custom factory before `eng.Run`:
+
+```go
+library.SetDefaultEmbeddingClientFactory(&myVaultEmbeddingFactory{})
+// or per-tenant:
+library.RegisterEmbeddingClientFactory("tenant-a", tenantAFactory)
+```
+
+`RetrieveOp` and `RetrieveWithFiltersOp` accept the same `credential_ref` / `client_factory_id` / `api_factory_timeout_ms` params as AI ops, routed to the embedding factory; an additional `embed_timeout_ms` param wraps the entire `Retriever.Retrieve` call with a deadline. See `examples/rag-gemini-embed/` for the end-to-end pattern.
 
 ## Extending the Library
 
@@ -415,8 +479,11 @@ Each example is a standalone Go binary that builds and runs a dagor workflow. Al
 | [`weather-advisor`](examples/weather-advisor/) | Fetches live weather data for a city (or fixture), classifies conditions via AI, and combines deterministic temperature-band logic with AI-generated outfit advice. | `CLAUDE_API_KEY` |
 | [`hn-topic-brief`](examples/hn-topic-brief/) | Queries the HN Algolia API for a topic, fans out per-story relevance and classification checks over a MapOver node, identifies the dominant category, and produces a styled topic brief. | `CLAUDE_API_KEY` |
 | [`faithful-summary`](examples/faithful-summary/) | Demonstrates cross-model verification: Claude summarizes a source document in 3–5 sentences, then Gemini independently checks whether every claim in the summary is grounded in the source text, returning a boolean faithfulness verdict. | `CLAUDE_API_KEY`, `GEMINI_API_KEY` |
+| [`with-repair`](examples/with-repair/) | AI-assisted repair around deterministic parse/validate ops: a strict parser returns `*library.ErrRepairable` on malformed input, the `WithRepair` wrapper sends a self-contained prompt to the LLM, parses the response back via `UnmarshalRepair`, and re-runs the inner op within a bounded attempt budget. | `CLAUDE_API_KEY` |
 | [`local-mcp-server`](examples/local-mcp-server/) | Two `MCPScriptOp` variants composed via MapOver against a local Playwright MCP subprocess: a Google search returns a slice of URLs, and per-URL screenshot sub-vertices fan out using the warm-replenish pool (`pool_size: 8`). Demonstrates `defer library.ShutdownMCPPool(...)` in `main()`. | none (requires `npx`) |
 | [`remote-mcp-server`](examples/remote-mcp-server/) | Single-vertex `MCPCallOp` against a remote (HTTP) MCP server — calls Cloudflare's public docs MCP at `https://docs.mcp.cloudflare.com/mcp` and prints the search result text. The minimal pattern for `transport: "http"`. | none |
+| [`rag-bm25`](examples/rag-bm25/) | Retrieval-augmented Q&A over a local `.txt` knowledge base. An in-memory BM25 `Retriever` (`bm25.go`) returns top-3 passages; `BuildRAGPromptOp` wraps each in a `<passage>` tag; the LLM answers and appends a `Sources:` trailer; `ParseCitationsOp` + `ValidateCitationsOp` filter the cited filenames against the actually-retrieved set so hallucinations are dropped. | `CLAUDE_API_KEY` |
+| [`rag-gemini-embed`](examples/rag-gemini-embed/) | Same graph shape as `rag-bm25` but with a vector-store-backed `Retriever` (`embed_retriever.go`) that embeds the corpus and the query via `library.ResolveEmbeddingClient` and ranks by cosine similarity. Demonstrates `EmbeddingClientFactory` credential plumbing — swap the in-memory cosine for pgvector / Pinecone / sqlite-vec without touching the routing code. | `GEMINI_API_KEY`, `CLAUDE_API_KEY` |
 
 ```bash
 # Example: run the summarization faithfulness checker
@@ -508,11 +575,17 @@ clawdag-go/
 ├── library/                — the framework itself (importable subpackage)
 │   ├── descriptions.go     — AllDescriptions() — joins all op description constants
 │   ├── const_op.go         — ConstOp[T] + RegisterConst (static constant injection)
-│   ├── math_ops.go         — AddOp, SubOp, DivOp, PackMathOperandsOp, …
+│   ├── math_ops.go         — AddFloatOp/AddIntOp, …, PackMathOperandsOp, cast ops
 │   ├── string_ops.go       — StringLookupOp, StringToLowerOp, …
 │   ├── time_ops.go         — CityTimeOp
 │   ├── mode_select_op.go   — ModeSelectOp
 │   ├── ai_compute_op.go    — generic AIComputeOp[In, Out] base
+│   ├── ai_factory.go       — AIClientFactory + EnvAIClientFactory (Claude/Gemini)
+│   ├── retriever.go        — Retriever interface + Document + metadata key constants + filter ctx helpers
+│   ├── retrieve_op.go      — RetrieveOp (top-k fan-in from a registered Retriever)
+│   ├── retrieve_with_filters_op.go — RetrieveWithFiltersOp (Filters wire + static_filters param)
+│   ├── validate_citations_op.go    — ValidateCitationsOp (allow-list filter for parsed LLM citations)
+│   ├── embedding_factory.go — EmbeddingClient[Factory] + EnvEmbeddingClientFactory (gemini-only) + ResolveEmbeddingClient
 │   ├── mcp_client.go       — low-level MCP session (subprocess + protocol handshake)
 │   ├── mcp_call_op.go      — generic MCPCallOp[In, Out] (single-call MCP wrapper)
 │   ├── mcp_script_op.go    — generic MCPScriptOp[In, Out] (multi-call scripted MCP session)
@@ -535,7 +608,7 @@ clawdag-go/
 │           ├── dagor-api.md
 │           └── examples/README.md
 ├── skills/                 — generated by go generate . (gitignored; do not edit)
-├── examples/               — six end-to-end workflow examples
+├── examples/               — end-to-end workflow examples (see the Examples table above)
 └── CLAUDE.md               — instructions for AI assistants in this repo
 ```
 

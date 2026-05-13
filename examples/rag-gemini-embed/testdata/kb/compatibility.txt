@@ -1,0 +1,8 @@
+Tessera thermostats work with most 24-volt forced-air heating and cooling
+systems, including conventional gas, oil, and electric furnaces, central air
+conditioning, and standard heat pumps. A C-wire is required; if your wall
+has only R, W, Y, and G wires, the included power adapter can substitute.
+Tessera does not currently support millivolt systems, line-voltage baseboard
+heat, or proprietary communicating systems from Carrier Infinity, Lennox
+iComfort, or Trane ComfortLink. Check the in-app compatibility checker
+before ordering if you are unsure.

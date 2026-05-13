@@ -205,6 +205,41 @@ Do NOT use the `[AI:...]` suffix on plain AI ops (`AIBoolOp`, `AIScoreOp`,
 The suffix is reserved for ops that wrap another op, because only the wrapped
 form risks an audit confusion about whether the LLM is in the path.
 
+# EXTERNAL CONTEXT — RETRIEVAL (RAG)
+When the workflow needs facts that are not in the user's input and cannot be hardcoded — a product
+knowledge base, past tickets, current documentation, a vector store — fan in retrieved context via
+`RetrieveOp`. The Go program registers a `library.Retriever` implementation (BM25, vector DB, hosted
+search, whatever) via `library.SetDefaultRetriever` before running the engine; the DAG sees a single
+op with `Query *string` input and `Documents []library.Document` + `Texts []string` outputs.
+
+Wire the `Texts` output (`[]string`, parallel to `Documents[i].Content` in best-first order) into the
+downstream AI op — it plugs directly into `AISummarizeOp` / `AIRerankOp` / `AIBestMatchOp.Candidates`,
+or into a small custom op that joins it with the user's question for a string→string answer step.
+Use the `Documents` output only when downstream logic needs the per-document ID, score, or the
+Retriever-specific `Metadata` map (citation URL, highlighted snippets, timestamps, ACL flags,
+per-field scores — whatever the hosted search platform returns beyond the body text). The framework
+passes `Metadata` through unchanged; downstream custom ops type-assert the keys they care about
+(`doc.Metadata["source_url"].(string)`). Document in your design which Metadata keys the Retriever
+populates so downstream consumers know what to expect. RetrieveOp params: `k` (default `"5"`) and
+an optional `retriever_id` for multi-backend setups.
+
+When the retrieval needs to be **scoped by values produced upstream in the DAG** — a tenant id from
+an auth step, a category from a classifier, a date range from a planner — use `RetrieveWithFiltersOp`
+instead. It adds one input wire (`Filters *map[string]string`) and installs the filters into ctx for
+the Retriever to consume. The Retriever implementation owns interpretation; document what keys it
+understands. Build the filter map upstream with a small custom op (or by chaining string ops) and
+wire it in. Use plain `RetrieveOp` when the retrieval has no per-request scoping — don't reach for
+`RetrieveWithFiltersOp` just because it exists.
+
+When the workflow has the model emit citations alongside its answer, the parsed citation list is
+UNTRUSTED — the LLM can hallucinate filenames that were never in the retrieved corpus. Wire
+`ValidateCitationsOp` between the citation parser and any downstream authoritative consumer
+(logger, audit record, file reader, UI). It filters `Raw *[]string` (parsed citations) against
+`Allowed *[]string` (the allow-list, built from the retrieved documents' source identifiers — NOT
+the full loaded corpus) and emits `Accepted` / `Rejected` slices. See the rag-bm25 example for the
+canonical wiring including the small inline op that extracts the allow-list from
+`RetrieveOp.Documents`.
+
 # AVAILABLE LIBRARY OPS:
 {{LIBRARY_DESCRIPTION}}
 

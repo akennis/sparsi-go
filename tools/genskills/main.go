@@ -6,7 +6,7 @@
 //   - skill-src/<skill>/references/examples/README.md                → verbatim copy
 //   - skill-src/clawdag-design/references/design-rules.md            → verbatim copy
 //   - skill-src/clawdag-codegen/references/dagor-api.md              → verbatim copy
-//   - examples/<name>/main.go                                        → examples/<name>.go (with //go:build ignore prepended)
+//   - examples/<name>/*.go (non-test)                                → examples/<name>/<file>.go (with //go:build ignore prepended to each)
 //   - library.AllDescriptions()                                      → library.md (per skill)
 //
 // Run via: go generate .
@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	dagailib "github.com/akennis/clawdag-go/library"
 )
@@ -33,6 +35,8 @@ var exampleDirs = []string{
 	"local-mcp-server",
 	"remote-mcp-server",
 	"with-repair",
+	"rag-bm25",
+	"rag-gemini-embed",
 }
 
 func main() {
@@ -61,16 +65,36 @@ func main() {
 	)
 
 	for _, exDir := range exampleDirs {
-		src := filepath.Join("examples", exDir, "main.go")
-		body, err := os.ReadFile(src)
+		srcDir := filepath.Join("examples", exDir)
+		entries, err := os.ReadDir(srcDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "read %s: %v\n", src, err)
+			fmt.Fprintf(os.Stderr, "read dir %s: %v\n", srcDir, err)
 			os.Exit(1)
 		}
-		tagged := []byte("//go:build ignore\n\n" + string(body))
-		for _, skill := range skillNames {
-			dst := filepath.Join("skills", skill, "references", "examples", exDir+".go")
-			mustWrite(dst, tagged)
+		var goFiles []string
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			goFiles = append(goFiles, name)
+		}
+		if len(goFiles) == 0 {
+			fmt.Fprintf(os.Stderr, "no .go files in %s\n", srcDir)
+			os.Exit(1)
+		}
+		sort.Strings(goFiles)
+		for _, fname := range goFiles {
+			body, err := os.ReadFile(filepath.Join(srcDir, fname))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "read %s: %v\n", filepath.Join(srcDir, fname), err)
+				os.Exit(1)
+			}
+			tagged := []byte("//go:build ignore\n\n" + string(body))
+			for _, skill := range skillNames {
+				dst := filepath.Join("skills", skill, "references", "examples", exDir, fname)
+				mustWrite(dst, tagged)
+			}
 		}
 	}
 }

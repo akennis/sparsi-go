@@ -1,0 +1,6 @@
+Tessera accepts Visa, Mastercard, American Express, Discover, Apple Pay,
+Google Pay, and PayPal. We do not accept checks, money orders, or
+cryptocurrency. Business customers ordering more than 10 units can request
+net-30 terms by emailing sales@tessera.example. All transactions are
+processed in US dollars; international customers will see a conversion on
+their statement at their bank's daily rate.
