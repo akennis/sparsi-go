@@ -47,6 +47,7 @@ Read the following references before writing any code:
 7. Run `go build ./...` in `<output_dir>` to compile.
 8. If the build fails, read the error output, fix `main.go`, and re-run step 7.
 9. Repeat until the build exits 0.
+10. Once the build is successful, notify the user and recommend running the compiled executable (e.g., `./solution` or `solution.exe`) rather than `go run main.go`. Mention any required CLI flags.
 
 # Implementation rules
 
