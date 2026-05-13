@@ -485,22 +485,46 @@ document it in the Retriever instead.
      - Out: Documents → `docs`, Texts → `texts`
   ```
 
-**Filter-value injection — parameterize backend queries.** Inside the
-Retriever, values read from `library.RetrievalFiltersFromContext` MUST
-be passed to the backend through parameterized queries / placeholder
-bindings — never string-concatenated into a SQL `WHERE` clause, a NoSQL
-query document, a search-engine query DSL, or any other backend
-expression. Filter values are caller-supplied strings and frequently
-originate from upstream AI ops (classifier, planner, JSON extractor)
-whose output is LLM-generated and untrusted; splicing them into a query
-string opens SQL injection, NoSQL injection (`$where`, `$ne` operator
-smuggling), Lucene/OpenSearch query-DSL injection, or vector-store
-metadata-predicate injection. Concretely: use `$1`/`?` placeholders with
-`database/sql` and `pgx`, the driver's typed BSON document API for
-MongoDB (not string-concatenated JSON), the SDK's typed filter struct
-for hosted vector stores (Pinecone `Filter`, Weaviate `where` builder),
-and the search client's term-query builder rather than raw query-string
-syntax for OpenSearch / Elasticsearch.
+**SECURITY — filter values are UNTRUSTED; parameterize, do not
+interpolate.** Inside the Retriever, values read from
+`library.RetrievalFiltersFromContext` (and the `query` argument itself)
+MUST be passed to the backend through the backend's parameterized-query
+/ placeholder / typed-filter API. They MUST NOT be string-concatenated
+into a SQL `WHERE` clause, a NoSQL query document, a search-engine query
+DSL, a regex pattern, a shell command, or any other interpreted context.
+
+Filter values are caller-supplied strings and frequently originate from
+upstream AI ops (classifier, planner, JSON extractor) whose output is
+LLM-generated and untrusted; splicing them into a query string opens SQL
+injection, NoSQL injection (`$where`, `$ne` operator smuggling),
+Lucene/OpenSearch query-DSL injection, or vector-store metadata-predicate
+injection. The threat model is identical to a public-internet web form
+that hands strings to your database.
+
+Correct (parameterized — backend escapes for you):
+
+```go
+rows, err := db.QueryContext(ctx,
+    "SELECT id, content FROM docs WHERE tenant = ? AND category = ?",
+    filters["tenant"], filters["category"])
+```
+
+Incorrect (string concatenation — SQL injection):
+
+```go
+rows, err := db.Exec(
+    "SELECT id, content FROM docs WHERE tenant='" + filters["tenant"] + "'")
+```
+
+Concretely, by backend: use `$1`/`?` placeholders with `database/sql`
+and `pgx`; the driver's typed BSON document API for MongoDB (not
+string-concatenated JSON); the SDK's typed filter struct for hosted
+vector stores (Pinecone `Filter`, Weaviate `where` builder); and the
+search client's term-query builder rather than raw query-string syntax
+for OpenSearch / Elasticsearch. The same rule applies to the `query`
+string itself when the backend interprets it as a query DSL — pass it
+through the backend's match/term API, never assemble query DSL by
+concatenation.
 
 **Multi-backend.** When the design references multiple Retrievers, register
 each under a distinct id and select per-vertex via the `retriever_id` param:

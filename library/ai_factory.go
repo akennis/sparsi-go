@@ -28,6 +28,15 @@ type AIClientFactory interface {
 // GEMINI_API_KEY from the process environment and caches the constructed
 // client per ref. Env-var credentials don't rotate, so a single entry under
 // the empty ref is the steady state for almost all callers.
+//
+// SECURITY: the per-ref cache has no eviction. Do NOT derive ref from
+// per-request input (tenant id, user id, request header value, query
+// parameter, anything an attacker can vary): doing so produces an
+// unbounded cache that leaks one *anthropic.Client / *genai.Client per
+// distinct value and is a memory-exhaustion / DoS vector. Use ref only
+// for the handful of named credential lookups the application itself
+// controls (e.g. "prod", "staging", "tenant-acme") and define that set
+// at deploy time, not from request data.
 type EnvAIClientFactory struct {
 	mu        sync.Mutex
 	anthropic map[string]*anthropic.Client

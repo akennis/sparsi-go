@@ -244,6 +244,9 @@ func (op *RetrievedSourcesOp) ResetFields() {
 	op.Sources = nil
 }
 
+// maxParsedCitations caps the Sources list from a single LLM response — protects against a crafted response emitting an unbounded list (DoS / memory exhaustion).
+const maxParsedCitations = 100
+
 // ParseCitationsOp splits an LLM response of the form
 //
 //	<answer body>
@@ -294,6 +297,14 @@ func (op *ParseCitationsOp) Run(_ context.Context) error {
 		if s = strings.TrimSpace(s); s != "" {
 			sources = append(sources, s)
 		}
+	}
+	if len(sources) > maxParsedCitations {
+		slog.Warn("citation list truncated; possible adversarial input or model misbehavior",
+			"op", "ParseCitationsOp",
+			"original_count", len(sources),
+			"kept", maxParsedCitations,
+		)
+		sources = sources[:maxParsedCitations]
 	}
 	op.Sources = sources
 	return nil

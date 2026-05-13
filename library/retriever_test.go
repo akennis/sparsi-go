@@ -379,6 +379,41 @@ func TestRetrievalFiltersFromContext_AbsentReturnsFalse(t *testing.T) {
 	}
 }
 
+// TestRetrievalFiltersFromContext_ReturnsDefensiveCopy asserts that mutating
+// the returned map does not affect the map stored on ctx — a subsequent call
+// must still see the original installed filters intact. Guards the defensive-
+// copy contract documented on RetrievalFiltersFromContext.
+func TestRetrievalFiltersFromContext_ReturnsDefensiveCopy(t *testing.T) {
+	installed := map[string]string{"tenant": "acme", "category": "billing"}
+	ctx := WithRetrievalFilters(context.Background(), installed)
+
+	first, ok := RetrievalFiltersFromContext(ctx)
+	if !ok {
+		t.Fatalf("first RetrievalFiltersFromContext ok=false, want true")
+	}
+	// Mutate the returned map every which way: overwrite, add, delete.
+	first["tenant"] = "globex"
+	first["injected"] = "bad"
+	delete(first, "category")
+
+	second, ok := RetrievalFiltersFromContext(ctx)
+	if !ok {
+		t.Fatalf("second RetrievalFiltersFromContext ok=false, want true")
+	}
+	if second["tenant"] != "acme" {
+		t.Fatalf("second[tenant] = %q, want %q (mutation of first call leaked into ctx)", second["tenant"], "acme")
+	}
+	if second["category"] != "billing" {
+		t.Fatalf("second[category] = %q, want %q (delete of first call leaked into ctx)", second["category"], "billing")
+	}
+	if _, present := second["injected"]; present {
+		t.Fatalf("second saw injected key from prior mutation; defensive-copy contract violated")
+	}
+	if len(second) != 2 {
+		t.Fatalf("second has %d keys, want 2 (original installed set)", len(second))
+	}
+}
+
 func TestWithRetrievalFilters_EmptyMapNoop(t *testing.T) {
 	base := context.Background()
 	if got := WithRetrievalFilters(base, nil); got != base {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -117,5 +118,40 @@ func TestParseCitations_NonASCIIBodyPreserved(t *testing.T) {
 	}
 	if !reflect.DeepEqual(op.Sources, []string{"city.txt"}) {
 		t.Fatalf("Sources = %v, want [city.txt]", op.Sources)
+	}
+}
+
+// TestParseCitations_SourcesListCapped verifies that ParseCitationsOp truncates
+// excessively long source lists to maxParsedCitations — protecting against
+// memory exhaustion from a crafted LLM response that emits a Sources: line
+// with millions of comma-separated entries.
+func TestParseCitations_SourcesListCapped(t *testing.T) {
+	const total = 250
+	parts := make([]string, total)
+	for i := 0; i < total; i++ {
+		parts[i] = fmt.Sprintf("s%d", i)
+	}
+	raw := "Body: an answer derived from a flood of citations.\n\nSources: " + strings.Join(parts, ", ")
+	op := runParse(t, raw)
+
+	if len(op.Sources) != maxParsedCitations {
+		t.Fatalf("len(Sources) = %d, want %d", len(op.Sources), maxParsedCitations)
+	}
+	if op.Sources[0] != "s0" {
+		t.Fatalf("Sources[0] = %q, want s0 (prefix order preserved)", op.Sources[0])
+	}
+	if op.Sources[99] != "s99" {
+		t.Fatalf("Sources[99] = %q, want s99", op.Sources[99])
+	}
+}
+
+// TestParseCitations_BelowCapUnchanged is a sanity check that a small Sources
+// list passes through untouched (i.e. the cap only triggers above the
+// threshold).
+func TestParseCitations_BelowCapUnchanged(t *testing.T) {
+	op := runParse(t, "Answer.\nSources: a.txt, b.txt, c.txt, d.txt, e.txt")
+	want := []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"}
+	if !reflect.DeepEqual(op.Sources, want) {
+		t.Fatalf("Sources = %v, want %v", op.Sources, want)
 	}
 }

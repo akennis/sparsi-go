@@ -18,6 +18,14 @@ import (
 // they populate; downstream custom ops type-assert the values they care
 // about (e.g. `doc.Metadata[MetadataSourceURL].(string)`). Leave nil when
 // there is nothing extra to carry.
+//
+// Metadata is `map[string]any` and values may be ANY concrete type — the
+// Retriever decides the shape of each key. Consumer code that type-asserts
+// on a key supplied by a third-party Retriever may panic if the Retriever
+// stored an unexpected shape (e.g. a Unix int under "updated_at" when the
+// consumer expected time.Time). Prefer the comma-ok form,
+// `v, ok := doc.Metadata[key].(string)`, when reading values from a
+// Retriever you do not control.
 type Document struct {
 	ID       string
 	Content  string
@@ -57,6 +65,21 @@ const (
 //
 // Implementations must be safe for concurrent Retrieve calls — graph
 // execution may invoke a single Retriever from multiple parallel vertices.
+//
+// SECURITY: both the query argument and any filter values read from ctx
+// via RetrievalFiltersFromContext are UNTRUSTED — they routinely
+// originate from upstream AI ops fed by LLM output. Retriever
+// implementations MUST pass these values to their backend through the
+// backend's parameterized-query / placeholder / typed-filter API. They
+// MUST NOT be string-concatenated into SQL, NoSQL query documents,
+// search-engine query DSLs, regex patterns, shell commands, or any
+// other interpreted context. Correct:
+//
+//	db.QueryContext(ctx, "SELECT ... WHERE tenant = ?", filters["tenant"])
+//
+// Incorrect (SQL injection):
+//
+//	db.Exec("... WHERE tenant='" + filters["tenant"] + "'")
 type Retriever interface {
 	Retrieve(ctx context.Context, query string, k int) ([]Document, error)
 }
@@ -121,17 +144,42 @@ func WithRetrievalFilters(ctx context.Context, filters map[string]string) contex
 // WithRetrievalFilters. Retriever implementations call this to read
 // request-scoped filters. Returns ok=false when no filters are present —
 // implementations should fall back to unfiltered retrieval in that case.
+// ok=true with a zero-length map means "filters were installed but empty"
+// (distinct from "no filters installed at all").
 //
-// The returned map must not be mutated; concurrent retrievers may share it.
+// The returned map is a fresh copy owned by the caller and safe to mutate;
+// changes do not affect the value stored on ctx or any concurrent
+// Retriever's view of it.
 //
-// Security: filter values are caller-supplied strings and may originate
-// from upstream AI ops (untrusted LLM output); Retriever implementations
-// MUST pass them to the backend through parameterized queries / placeholder
-// bindings, never by string-concatenating them into a SQL WHERE clause,
-// NoSQL query document, or search-engine query DSL.
+// SECURITY: filter values are UNTRUSTED. They may originate from upstream
+// AI ops fed by LLM output (see RetrieveWithFiltersOp, whose Filters wire
+// often connects to a classifier, planner, or JSON-extractor vertex), and
+// must be treated with the same caution as any other LLM-sourced string.
+// Retriever implementations MUST pass filter values to their backend
+// through the backend's parameterized-query / placeholder / typed-filter
+// API. They MUST NOT be string-concatenated into SQL, NoSQL query
+// documents, search-engine query DSLs, regex patterns, shell commands, or
+// any other interpreted context. Correct:
+//
+//	db.QueryContext(ctx, "SELECT ... WHERE tenant = ?", filters["tenant"])
+//
+// Incorrect (SQL injection):
+//
+//	db.Exec("... WHERE tenant='" + filters["tenant"] + "'")
 func RetrievalFiltersFromContext(ctx context.Context) (map[string]string, bool) {
 	f, ok := ctx.Value(retrievalFiltersKey{}).(map[string]string)
-	return f, ok
+	if !ok {
+		return nil, false
+	}
+	// Return a defensive copy so callers can mutate freely without
+	// affecting the map stored on ctx (which concurrent Retrievers may
+	// also be reading). Preserve the "installed but empty" signal by
+	// returning a non-nil empty map in that case.
+	out := make(map[string]string, len(f))
+	for k, v := range f {
+		out[k] = v
+	}
+	return out, true
 }
 
 // resolveRetriever looks up an id in the registry; missing ids fall back to

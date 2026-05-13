@@ -60,6 +60,17 @@ const geminiEmbeddingMaxBatch = 100
 //
 // The factory caches one *genai.Client per ref; the lightweight
 // geminiEmbeddingClient adapter is built on demand wrapping (client, model).
+// Env-var credentials don't rotate, so a single entry under the empty ref
+// is the steady state for almost all callers.
+//
+// SECURITY: the per-ref cache has no eviction. Do NOT derive ref from
+// per-request input (tenant id, user id, request header value, query
+// parameter, anything an attacker can vary): doing so produces an
+// unbounded cache that leaks one *genai.Client per distinct value and is
+// a memory-exhaustion / DoS vector. Use ref only for the handful of
+// named credential lookups the application itself controls (e.g. "prod",
+// "staging", "voyage-prod") and define that set at deploy time, not from
+// request data.
 //
 // Batch size: the returned EmbeddingClient.Embed caps each upstream
 // EmbedContent call at geminiEmbeddingMaxBatch (100) inputs and chunks
@@ -266,6 +277,20 @@ func EmbeddingCredentialsFromContext(ctx context.Context) EmbeddingCredentials {
 // If FactoryTimeout > 0 on the installed credentials, only the factory
 // credential lookup is bounded by that deadline — the returned client's
 // Embed calls honor whatever ctx the caller passes them.
+//
+// Deadline scope is narrow: FactoryTimeout bounds ONLY this function's
+// call into EmbeddingClientFactory.Embedder (the credential-lookup leg —
+// Vault / Secrets Manager / KMS round trip / SDK client construction).
+// Once the returned EmbeddingClient is in hand, every subsequent call
+// against it (notably Embed) inherits its deadline entirely from
+// whatever ctx the caller passes, and depends on the underlying SDK
+// honoring ctx for cancellation. Custom Retrievers built on top of this
+// MUST thread the inbound ctx into every downstream call (Embed, vector
+// search, post-filtering) so the framework-level retrieval timeout
+// propagates. RetrieveOp / RetrieveWithFiltersOp wrap the entire
+// Retrieve invocation with context.WithTimeout when embed_timeout_ms is
+// set, so framework-wired graphs are protected end-to-end; ad-hoc
+// Retriever code outside that wrapper is not.
 func ResolveEmbeddingClient(ctx context.Context, provider, model string) (EmbeddingClient, error) {
 	creds := EmbeddingCredentialsFromContext(ctx)
 	factory := resolveEmbeddingFactory(creds.FactoryID)
