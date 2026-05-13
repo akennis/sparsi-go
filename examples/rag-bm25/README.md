@@ -8,19 +8,26 @@ The example loads every `.txt` file under `testdata/kb/`, tagging each
 (`library.MetadataSource == "source"`). The
 documents are indexed by an in-memory BM25 retriever (`bm25.go`) and
 registered as the process default via `library.SetDefaultRetriever`. The
-graph then runs four vertices:
+graph then runs seven vertices:
 
 1. lifts the question into the graph (`question_const`)
 2. retrieves the top-3 matching passages (`RetrieveOp`, k=3)
-3. labels each passage with its source filename and asks the LLM to end with
-   a `Sources: <files>` trailer (`BuildRAGPromptOp` + `AIComputeStringToStringOp`)
-4. splits the response into answer body and cited filenames
+3. labels each passage with its source filename and wraps it in a
+   `<passage>` tag (`BuildRAGPromptOp`)
+4. extracts the allow-list of source identifiers actually present in the
+   retrieved passages (`RetrievedSourcesOp`, custom inline op)
+5. asks the LLM to answer using only the provided context and to end with
+   a `Sources: <files>` trailer (`AIComputeStringToStringOp`)
+6. splits the response into answer body and cited filenames
    (`ParseCitationsOp`)
+7. filters the parsed citations against the retrieved allow-list
+   (`ValidateCitationsOp`) — hallucinated filenames land in `Rejected`,
+   surviving entries in `Accepted`
 
-The driver filters cited filenames against the loaded KB (so an LLM
-hallucinating `fictional.txt` gets dropped with a stderr warning) and prints
-the answer followed by a `Sources: ...` line listing exactly which KB files
-the model says it used.
+The driver reads `accepted_sources` for display and slog-warns each
+`rejected_sources` entry, so an LLM hallucinating `fictional.txt` is
+dropped with a stderr warning. Output is the answer body followed by a
+`Sources: ...` line listing exactly which KB files the model says it used.
 
 The point of the example is the **pattern**, not BM25 specifically. To swap
 in any other backend — pgvector, sqlite-vec, Pinecone, a hosted search

@@ -231,6 +231,15 @@ understands. Build the filter map upstream with a small custom op (or by chainin
 wire it in. Use plain `RetrieveOp` when the retrieval has no per-request scoping — don't reach for
 `RetrieveWithFiltersOp` just because it exists.
 
+When the workflow has the model emit citations alongside its answer, the parsed citation list is
+UNTRUSTED — the LLM can hallucinate filenames that were never in the retrieved corpus. Wire
+`ValidateCitationsOp` between the citation parser and any downstream authoritative consumer
+(logger, audit record, file reader, UI). It filters `Raw *[]string` (parsed citations) against
+`Allowed *[]string` (the allow-list, built from the retrieved documents' source identifiers — NOT
+the full loaded corpus) and emits `Accepted` / `Rejected` slices. See the rag-bm25 example for the
+canonical wiring including the small inline op that extracts the allow-list from
+`RetrieveOp.Documents`.
+
 # AVAILABLE LIBRARY OPS:
 {{LIBRARY_DESCRIPTION}}
 

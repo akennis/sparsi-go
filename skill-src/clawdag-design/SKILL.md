@@ -223,20 +223,31 @@ names the retrieval vertex and its wiring. See
 source-file citation extraction (read both `main.go` and `bm25.go`).
 
 **Citation re-validation — security rule, not style.** Treat the
-`Sources` list emitted by `ParseCitationsOp` as untrusted: the LLM can
-hallucinate filenames that were never in the retrieved corpus, and a
-hallucinated citation flowing into a logger, audit record, file reader,
-or any other surface that treats filenames as authoritative is a real
-security bug (forged provenance, log injection, downstream file-read of
-attacker-chosen paths). Any design that uses `ParseCitationsOp` MUST
-name a downstream re-validation step — typically the driver — that
-filters the parsed `Sources` against the set of filenames the Retriever
-could actually have returned (e.g. the `library.MetadataSource` values
-of the loaded corpus) BEFORE display, logging, audit records, file
-reads, or any consumer that treats the citation as authoritative.
-`examples/rag-bm25/main.go` and `examples/rag-gemini-embed/main.go`
-demonstrate this with a `knownSources` filter; if the design has such a
-consumer it must call out an equivalent filter in **Design Rationale**.
+`Sources` list emitted by your design's citation parser (typically a
+custom `ParseCitationsOp` inline op — the library does not ship one) as
+untrusted: the LLM can hallucinate filenames that were never in the
+retrieved corpus, and a hallucinated citation flowing into a logger,
+audit record, file reader, or any other surface that treats filenames
+as authoritative is a real security bug (forged provenance, log
+injection, downstream file-read of attacker-chosen paths). Any design
+that parses LLM-emitted citations MUST wire a `ValidateCitationsOp`
+vertex (the library op for this) between the parser and any downstream
+authoritative consumer — never route the parser's raw `Sources` slice to
+display, logging, audit records, file reads, or anything that treats it
+as trustworthy.
+
+`ValidateCitationsOp` takes `Raw *[]string` (the parsed citations) and
+`Allowed *[]string` (the allow-list of legitimate source identifiers,
+typically the `library.MetadataSource` values of the retrieved
+documents — NOT the full loaded corpus, so a model that hallucinates the
+filename of a real-but-unretrieved KB document is still caught). Build
+the allow-list with a small custom op that walks `RetrieveOp.Documents`
+and pulls `Metadata[library.MetadataSource]` (see
+`examples/rag-bm25/main.go`'s `RetrievedSourcesOp` for the canonical
+shape). The op outputs `Accepted []string` (de-duplicated, order
+preserved) and `Rejected []string` — wire `Accepted` into the
+authoritative consumer and slog-warn the `Rejected` entries for
+observability.
 
 **Per-vertex routing — three orthogonal axes.** `retriever_id`,
 `client_factory_id`, and `credential_ref` compose independently. Mental

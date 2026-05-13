@@ -552,41 +552,73 @@ wiring, prompt-builder, citation parser) and `bm25.go` (the Retriever
 implementation) — read both before generating, since a custom Retriever is
 the part you have to invent.
 
-**Citation re-validation — security rule, not style.** `ParseCitationsOp`
-output is untrusted: the LLM can fabricate filenames that were never in
-the retrieved corpus, and a hallucinated citation reaching a logger,
-audit record, `os.ReadFile`, or any other surface that treats filenames
-as authoritative is a real security bug (forged provenance, log
-injection, downstream file-read of attacker-chosen paths). Whenever the
-generated workflow exposes `Sources` to such a consumer, emit a
-re-validation step that filters the parsed list against the set of
-filenames the Retriever could actually have returned — typically the
-`library.MetadataSource` values of the loaded corpus — BEFORE printing,
-logging, persisting, or reading files. Drop unknown entries (and log a
-warning naming the bogus filename). The driver blocks in
-`examples/rag-bm25/main.go` and `examples/rag-gemini-embed/main.go` show
-the canonical shape:
+**Citation re-validation — security rule, not style.** A custom
+`ParseCitationsOp`'s `Sources` output is untrusted: the LLM can fabricate
+filenames that were never in the retrieved corpus, and a hallucinated
+citation reaching a logger, audit record, `os.ReadFile`, or any other
+surface that treats filenames as authoritative is a real security bug
+(forged provenance, log injection, downstream file-read of
+attacker-chosen paths). Whenever the generated workflow exposes the
+parsed `Sources` to such a consumer, wire `ValidateCitationsOp` between
+the parser and the consumer — it is a library op for exactly this
+purpose. Do NOT emit driver-side filtering loops; the validation
+belongs inside the graph.
+
+`ValidateCitationsOp` has two inputs and two outputs:
+- `Raw *[]string` ← the parser's `Sources` wire
+- `Allowed *[]string` ← an allow-list of legitimate source identifiers,
+  built from the **retrieved** documents (not the full loaded corpus, so
+  a model that hallucinates the filename of a real-but-unretrieved KB
+  document is still caught). The canonical pattern is a small inline op
+  (call it `RetrievedSourcesOp`) that walks `RetrieveOp.Documents` and
+  pulls `Metadata[library.MetadataSource]`, de-duplicated and ordered by
+  first appearance — see `examples/rag-bm25/main.go` for the
+  copy-pasteable shape.
+- `Accepted []string` → wire this into the authoritative consumer
+  (display, log, file reader, downstream tooling). De-duplicated, order
+  preserved from `Raw`.
+- `Rejected []string` → slog-warn each entry in the driver for
+  observability; never route it onward.
 
 ```go
-knownSources := map[string]bool{}
-for _, d := range docs {
-    if s, ok := d.Metadata[library.MetadataSource].(string); ok && s != "" {
-        knownSources[s] = true
+// Custom inline op that builds the allow-list from retrieved documents.
+type RetrievedSourcesOp struct {
+    Documents *[]library.Document `dag:"input"`
+    Sources   []string            `dag:"output"`
+}
+// Setup/Reset/Run/InputFields/OutputFields/SetInputField/ResetFields:
+// walk *op.Documents, collect Metadata[library.MetadataSource] strings
+// de-duplicated and ordered by first appearance. See
+// references/examples/rag-bm25/main.go for the full implementation.
+
+// Graph wiring after the citation parser:
+Vertex("retrieved_sources").Op("RetrievedSourcesOp").
+    Input("Documents", "documents").
+    Output("Sources", "retrieved_sources").
+
+Vertex("validate_citations").Op("ValidateCitationsOp").
+    Input("Raw", "parsed_sources").       // from your ParseCitationsOp
+    Input("Allowed", "retrieved_sources"). // from RetrievedSourcesOp above
+    Output("Accepted", "accepted_sources").
+    Output("Rejected", "rejected_sources").
+
+// Driver — read accepted, slog-warn rejected:
+if raw, ok := eng.GetOutput("accepted_sources"); ok {
+    if p, ok := raw.(*[]string); ok && p != nil {
+        // display *p alongside the answer
     }
 }
-// ... after eng.Run, with `sources` taken from the parse_citations output:
-cited := make([]string, 0, len(sources))
-for _, s := range sources {
-    if knownSources[s] {
-        cited = append(cited, s)
-    } else {
-        slog.Warn("dropping hallucinated source", "source", s)
+if raw, ok := eng.GetOutput("rejected_sources"); ok {
+    if p, ok := raw.(*[]string); ok && p != nil {
+        for _, s := range *p {
+            slog.Warn("dropping hallucinated source", "source", s)
+        }
     }
 }
 ```
 
-Mirror this in the generated `main.go` whenever the design wires
-`ParseCitationsOp`'s `Sources` into a downstream authoritative consumer.
+Mirror this in the generated `main.go` whenever the design wires a
+citation parser's `Sources` into a downstream authoritative consumer.
 Do not treat the parsed list as trusted just because the retrieval
 vertex succeeded — the parser is a string splitter, not a validator.
 

@@ -13,15 +13,21 @@ via `library.ResolveEmbeddingClient` (the framework's
 code) and stores the vectors in memory. Each request embeds the query
 with the same model and ranks the corpus by cosine similarity.
 
-The graph is identical in shape to `rag-bm25`:
+The graph is identical in shape to `rag-bm25` — seven vertices:
 
 1. lifts the question into the graph (`question_const`)
 2. retrieves the top-3 matching passages (`RetrieveOp`, k=3)
-3. labels each passage with its source filename and asks the LLM to end
-   with a `Sources: <files>` trailer
-   (`BuildRAGPromptOp` + `AIComputeStringToStringOp`)
-4. splits the response into answer body and cited filenames
+3. labels each passage with its source filename and wraps it in a
+   `<passage>` tag (`BuildRAGPromptOp`)
+4. extracts the allow-list of source identifiers actually present in the
+   retrieved passages (`RetrievedSourcesOp`, custom inline op)
+5. asks the LLM to answer using only the provided context and to end
+   with a `Sources: <files>` trailer (`AIComputeStringToStringOp`)
+6. splits the response into answer body and cited filenames
    (`ParseCitationsOp`)
+7. filters the parsed citations against the retrieved allow-list
+   (`ValidateCitationsOp`) — hallucinated filenames land in `Rejected`,
+   surviving entries in `Accepted`
 
 The point of this example is the **credential plumbing** — a
 vector-store-backed `Retriever` consumes the framework's
