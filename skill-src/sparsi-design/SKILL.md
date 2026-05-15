@@ -15,6 +15,8 @@ deterministic design: every step that can be a library op or custom deterministi
 AI calls are reserved for genuine natural-language parsing or subjective judgment where no
 deterministic alternative exists.
 
+**API Key Configuration:** For LLM providers (Claude, Gemini), assume the API keys (`CLAUDE_API_KEY`, `GEMINI_API_KEY`) are already set. For all other third-party APIs (search engines, vector stores, etc.), do not assume they are set; instead, explicitly tell the user to set them as environment variables. In all cases, do not design complex credential-fetching logic (e.g., Vault, Secret Manager) unless explicitly requested; rely on standard environment-based lookup (e.g., `EnvAIClientFactory`).
+
 Read the following references before producing any output:
 1. `references/library.md` — all 91 op descriptions grouped by category
 2. `references/design-rules.md` — design constraints, anti-patterns, and required patterns
@@ -379,9 +381,10 @@ Do this before or as part of presenting your initial design.
 3. **Identify missing data sources and AI preferences:**
    - Check if the task requires files, URLs, or external tools that aren't specified.
    - Check if AI operations are needed and which provider/model should be used.
-4. **Ask for clarification:**
+4. **Ask for clarification and specify environment needs:**
    - If sources are missing, ask for details (and whether they should be hardcoded or runtime inputs).
    - Ask for AI provider and model preferences (e.g., Claude vs. Gemini).
+   - **If using non-LLM APIs:** Explicitly tell the user which environment variables they need to set (e.g., "This design requires `SERPER_API_KEY` and `PINECONE_API_KEY` to be set in your environment").
 5. Select the structurally closest example from `references/examples/README.md` and read it.
 6. Draft a complete DAG design in the output format below.
 7. Present the design to the user. Ask: "Does this design look right? Any changes before I hand it to codegen?"
