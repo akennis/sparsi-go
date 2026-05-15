@@ -51,6 +51,7 @@ Read the following references before writing any code:
 8. If the build fails, read the error output, fix `main.go`, and re-run step 7.
 9. Repeat until the build exits 0.
 10. **Runtime Validation:** You MUST verify the behavioral correctness of the generated program before finishing. Run the compiled executable with representative sample inputs (based on the original task description).
+    - **Live API Keys:** Tests and validation MUST use actual API keys (read from environment variables) for any third-party services (LLMs, etc.) used by the workflow. Do NOT use dummy, mock, or placeholder keys. Ensure your environment has the necessary `CLAUDE_API_KEY`, `GEMINI_API_KEY`, or other required keys set before running.
     - If CLI flags are required, provide them.
     - Inspect the output and logs to ensure the workflow is executing the expected vertices and producing the correct results.
     - Use `slog` level `Debug` if the behavior is opaque.
