@@ -354,8 +354,8 @@ used in **Design Rationale** so codegen emits the matching
 When a workflow requires AI operations (e.g., `AIBoolOp`, `AIComputeOp`, `AIRerankOp`), you MUST ask the user for their preferred AI provider and model if they haven't specified them.
 
 - **Default:** If the user has no preference, the library defaults to `provider: "claude"`, `model: "claude-sonnet-4-6"`.
-- **Options:** Mention that `provider: "gemini"`, `model: "gemini-3.0-flash-preview"` is a common alternative.
-- **Elicitation:** Ask: "Which AI provider and model would you like to use for the AI steps? (e.g., Claude Sonnet 4.6, Gemini 3.0 Flash Preview)".
+- **Options:** Mention that `provider: "gemini"`, `model: "gemini-3-flash-preview"` is a common alternative.
+- **Elicitation:** Ask: "Which AI provider and model would you like to use for the AI steps? (e.g., Claude Sonnet 4.6, Gemini 3 Flash Preview)".
 
 Do this before or as part of presenting your initial design.
 
