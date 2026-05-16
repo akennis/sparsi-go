@@ -15,6 +15,8 @@ deterministic design: every step that can be a library op or custom deterministi
 AI calls are reserved for genuine natural-language parsing or subjective judgment where no
 deterministic alternative exists.
 
+**API Key Configuration:** For LLM providers (Claude, Gemini), assume the API keys (`CLAUDE_API_KEY`, `GEMINI_API_KEY`) are already set. For all other third-party APIs (search engines, vector stores, etc.), do not assume they are set; instead, explicitly tell the user to set them as environment variables. In all cases, do not design complex credential-fetching logic (e.g., Vault, Secret Manager) unless explicitly requested; rely on standard environment-based lookup (e.g., `EnvAIClientFactory`).
+
 Read the following references before producing any output:
 1. `references/library.md` — all 91 op descriptions grouped by category
 2. `references/design-rules.md` — design constraints, anti-patterns, and required patterns
@@ -349,15 +351,45 @@ and routing key (`credential_ref`) need to vary. List every factory id
 used in **Design Rationale** so codegen emits the matching
 `RegisterAIClientFactory` calls in `main()`.
 
+# AI Provider Elicitation
+
+When a workflow requires AI operations (e.g., `AIBoolOp`, `AIComputeOp`, `AIRerankOp`), you MUST ask the user for their preferred AI provider and model if they haven't specified them.
+
+- **Default:** If the user has no preference, the library defaults to `provider: "claude"`, `model: "claude-sonnet-4-6"`.
+- **Options:** Mention that `provider: "gemini"`, `model: "gemini-3-flash-preview"` is a common alternative.
+- **Elicitation:** Ask: "Which AI provider and model would you like to use for the AI steps? (e.g., Claude Sonnet 4.6, Gemini 3 Flash Preview)".
+
+Do this before or as part of presenting your initial design.
+
+# Eliciting Missing Data Sources
+
+If the user's task implies the use of external data (files, URLs, MCP tools, databases) but does not provide specific details (e.g., paths, commands, retriever names), you MUST NOT invent placeholders or assume they should always be runtime inputs.
+
+**CRITICAL: Do NOT hallucinate MCP server details.** If the user mentions an MCP server by name but does not provide the `url` (for HTTP) or `command` and `args` (for stdio), you MUST ask for them. Do NOT guess the URL based on the server name.
+
+Instead:
+1. Identify the missing data sources.
+2. Ask the user for the specifics (e.g., "What is the path to the file you want to analyze?", "What is the command and arguments for the MCP server?", "What is the URL for the MCP server?").
+3. Ask if the source should be a **hardcoded constant** (fixed for all runs) or a **runtime input** (different every time).
+
+Do this before or as part of presenting your initial design.
+
 # Steps
 
 1. Read `references/library.md` and identify every op that is relevant to the task.
 2. Read `references/design-rules.md` fully — especially the BRANCHING and BOOLEAN SELECTION sections.
-3. Select the structurally closest example from `references/examples/README.md` and read it.
-4. Draft a complete DAG design in the output format below.
-5. Present the design to the user. Ask: "Does this design look right? Any changes before I hand it to codegen?"
-6. If the user provides feedback, incorporate it and redraft. Repeat until explicit approval.
-7. The final approved design is the output — do not proceed to code generation.
+3. **Identify missing data sources and AI preferences:**
+   - Check if the task requires files, URLs, or external tools that aren't specified.
+   - Check if AI operations are needed and which provider/model should be used.
+4. **Ask for clarification and specify environment needs:**
+   - If sources are missing, ask for details (and whether they should be hardcoded or runtime inputs).
+   - Ask for AI provider and model preferences (e.g., Claude vs. Gemini).
+   - **If using non-LLM APIs:** Explicitly tell the user which environment variables they need to set (e.g., "This design requires `SERPER_API_KEY` and `PINECONE_API_KEY` to be set in your environment").
+5. Select the structurally closest example from `references/examples/README.md` and read it.
+6. Draft a complete DAG design in the output format below.
+7. Present the design to the user. Ask: "Does this design look right? Any changes before I hand it to codegen?"
+8. If the user provides feedback, incorporate it and redraft. Repeat until explicit approval.
+9. The final approved design is the output — do not proceed to code generation.
 
 # Refinement loop
 
