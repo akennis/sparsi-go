@@ -41,19 +41,20 @@ Read the following references before writing any code:
    - `go get github.com/wwz16/dagor`
    - `go mod tidy`
    This ensures the `main` branch of `sparsi-go` is used and the `dagor` dependency is correctly routed.
-6. Run `go build ./...` in `<output_dir>` to compile.
+6. **Build Solution:** Run the following commands in `<output_dir>` to compile. Use a fixed output name to ensure only one executable exists.
+   - **Cleanup:** Delete any existing `solution` and `solution.exe` files in the directory to start fresh.
+   - **Build:** `go build -o solution.exe ./...` (on Windows) or `go build -o solution ./...` (on Unix).
 7. If the build fails, read the error output, fix `main.go`, and re-run step 6.
 8. Repeat until the build exits 0.
-9. **Runtime Validation:** You MUST verify the behavioral correctness of the generated program before finishing. Run the compiled executable with representative sample inputs (based on the original task description).
+9. **Runtime Validation:** You MUST verify the behavioral correctness of the generated program before finishing. Run the compiled executable (`.\solution.exe` on Windows, `./solution` on Unix) with representative sample inputs (based on the original task description) **and the `-v` flag enabled to ensure all debug logging is visible in the verification output.**
     - **Live API Keys:** Tests and validation MUST use actual API keys (read from environment variables) for any third-party services (LLMs, etc.) used by the workflow. Do NOT use dummy, mock, or placeholder keys. Ensure your environment has the necessary `CLAUDE_API_KEY`, `GEMINI_API_KEY`, or other required keys set before running.
     - If CLI flags are required, provide them.
-    - Inspect the output and logs to ensure the workflow is executing the expected vertices and producing the correct results.
-    - Use `slog` level `Debug` if the behavior is opaque.
+    - Inspect the output and logs (which will include the reporter's vertex-level detail thanks to `-v`) to ensure the workflow is executing the expected vertices and producing the correct results.
 10. **Iterate on Runtime Failures:** If the program crashes, produces incorrect results, or fails to meet the task requirements:
     - Diagnose the root cause from the output/logs.
     - Fix `main.go` or any custom op implementations.
     - Repeat from Step 6 (rebuild and re-validate).
-11. Once the build and runtime behavior are both verified, notify the user and recommend running the compiled executable. Mention the exact command and CLI flags used for successful validation.
+11. Once the build and runtime behavior are both verified, notify the user and recommend running the compiled executable. Mention the exact command and CLI flags used for successful validation. Ensure ONLY the final `solution.exe` (Windows) or `solution` (Unix) executable remains in the directory. Remove any intermediate or failed build artifacts.
 
 # Implementation rules
 
@@ -151,10 +152,20 @@ Never call `os.Getenv` inside an operator's `Setup` or `Run`.
 Parse all user inputs from CLI flags in `main()` using the `flag` package. Validate required flags
 before building the graph. Generated programs are plain CLI tools — no server modes or HTTP handlers.
 
+Always include a `-v` (verbose) flag to toggle between `slog.LevelInfo` and `slog.LevelDebug`.
+
 ```go
 input := flag.String("input", "", "input text to process")
+verbose := flag.Bool("v", false, "enable verbose (debug) logging")
 flag.Parse()
 if *input == "" { log.Fatal("--input is required") }
+
+level := slog.LevelInfo
+if *verbose {
+    level = slog.LevelDebug
+}
+slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+
 // then: context.WithValue, buildGraph, eng.Run
 ```
 
