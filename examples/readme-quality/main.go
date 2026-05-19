@@ -16,11 +16,13 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "github.com/akennis/sparsi-go/library"    // registers library ops
 	_ "github.com/wwz16/dagor/operator/builtin" // registers CoalesceNStringOp
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/reporter"
@@ -317,7 +319,18 @@ func buildGraph(mode sourceMode) (*graph.Graph, error) {
 
 // ─── Driver ────────────────────────────────────────────────────────────────
 
-type result struct {
+// UserInput is the external boundary of the workflow. In CLI mode it is filled
+// from --slug; in MCP mode the SDK derives the tool input schema from this
+// struct and deserializes + validates every tools/call request into it. The
+// MCP path always fetches the README live — the --fixture offline mode is a
+// CLI-only convenience resolved before the shared path.
+type UserInput struct {
+	Slug string `json:"slug" jsonschema:"the owner/repo slug whose README to assess, e.g. golang/go; required"`
+}
+
+// Result is the workflow's structured output: the MCP tool's typed Out (the
+// SDK emits it as structured content + a JSON text block) and the CLI's stdout.
+type Result struct {
 	Slug         string   `json:"slug"`
 	Purpose      string   `json:"purpose"`
 	DocScore     float64  `json:"doc_score"`
@@ -330,79 +343,49 @@ type result struct {
 	AINodes      []string `json:"ai_nodes"`
 }
 
-func main() {
-	var (
-		slug    = flag.String("slug", "", "owner/repo slug, e.g. golang/go")
-		fixture = flag.String("fixture", "", "path to a pre-saved README file (offline mode)")
-	)
-	flag.Parse()
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+// runConfig is the resolved data source for one execution: either a live
+// owner/repo (two raw.githubusercontent.com URLs) or a pre-read fixture body.
+type runConfig struct {
+	mode        sourceMode
+	displaySlug string
+	readmeBody  string
+	mainURL     string
+	masterURL   string
+}
 
-	if *slug == "" && *fixture == "" {
-		fmt.Fprintln(os.Stderr, "usage: 03-readme-quality --slug <owner/repo>  |  --fixture <path>")
-		os.Exit(2)
-	}
-	if *slug != "" && *fixture != "" {
-		fmt.Fprintln(os.Stderr, "specify exactly one of --slug or --fixture")
-		os.Exit(2)
-	}
+// ─── Shared execution path ─────────────────────────────────────────────────
 
-	var mode sourceMode
-	var readmeBody, mainURL, masterURL string
-	displaySlug := *slug
-
-	switch {
-	case *fixture != "":
-		raw, err := os.ReadFile(*fixture)
-		if err != nil {
-			log.Fatalf("read fixture: %v", err)
-		}
-		mode = sourceFixture
-		readmeBody = string(raw)
-		displaySlug = *fixture
-
-	default:
-		mode = sourceLive
-		mainURL = "https://raw.githubusercontent.com/" + *slug + "/main/README.md"
-		masterURL = "https://raw.githubusercontent.com/" + *slug + "/master/README.md"
-	}
-
-	registerPredicates()
-
-	g, err := buildGraph(mode)
+// execute builds a fresh graph + engine for one resolved runConfig and
+// extracts the structured Result. A fresh graph per invocation keeps
+// concurrent MCP tool calls from sharing mutable operator state; the
+// ants.Pool is safe to share.
+func execute(ctx context.Context, pool *ants.Pool, cfg runConfig) (Result, error) {
+	g, err := buildGraph(cfg.mode)
 	if err != nil {
-		log.Fatalf("build graph: %v", err)
+		return Result{}, fmt.Errorf("build graph: %w", err)
 	}
-
-	pool, err := ants.NewPool(10)
-	if err != nil {
-		log.Fatalf("create pool: %v", err)
-	}
-	defer pool.Release()
 
 	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
 	if err != nil {
-		log.Fatalf("create engine: %v", err)
+		return Result{}, fmt.Errorf("create engine: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
 	ctx = context.WithValue(ctx, const200Key{}, 200)
 	ctx = context.WithValue(ctx, const2Key{}, 2.0)
 	ctx = context.WithValue(ctx, warningKey{}, "\n\nWARNING: tests not mentioned")
 	ctx = context.WithValue(ctx, emptyKey{}, "")
-	if mode == sourceFixture {
-		ctx = context.WithValue(ctx, readmeBodyKey{}, readmeBody)
+	if cfg.mode == sourceFixture {
+		ctx = context.WithValue(ctx, readmeBodyKey{}, cfg.readmeBody)
 	} else {
-		ctx = context.WithValue(ctx, mainURLKey{}, mainURL)
-		ctx = context.WithValue(ctx, masterURLKey{}, masterURL)
+		ctx = context.WithValue(ctx, mainURLKey{}, cfg.mainURL)
+		ctx = context.WithValue(ctx, masterURLKey{}, cfg.masterURL)
 	}
 
 	if err := eng.Run(ctx); err != nil {
-		log.Fatalf("run graph: %v", err)
+		return Result{}, fmt.Errorf("run graph: %w", err)
 	}
 
-	out := result{Slug: displaySlug}
+	out := Result{Slug: cfg.displaySlug}
 
 	if v, ok := getString(eng, "purpose_str"); ok {
 		out.Purpose = v
@@ -452,10 +435,114 @@ func main() {
 			out.AINodes = append(out.AINodes, c.op)
 		}
 	}
+	return out, nil
+}
+
+// runWorkflow is the live path shared by the MCP tool and CLI live mode: it
+// derives the main/master README URLs for the slug, then runs the graph.
+func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
+	cfg := runConfig{
+		mode:        sourceLive,
+		displaySlug: in.Slug,
+		mainURL:     "https://raw.githubusercontent.com/" + in.Slug + "/main/README.md",
+		masterURL:   "https://raw.githubusercontent.com/" + in.Slug + "/master/README.md",
+	}
+	return execute(ctx, pool, cfg)
+}
+
+// ─── MCP server mode ───────────────────────────────────────────────────────
+
+// runMCPServer exposes the workflow as one MCP tool over stdin/stdout. The SDK
+// infers the tool input schema from UserInput, auto-deserializes + validates
+// each request, and (because Out is non-any) emits Result as structured
+// content plus a JSON text block, so the handler returns nil for the result.
+func runMCPServer(pool *ants.Pool) {
+	server := mcp.NewServer(&mcp.Implementation{
+		Name:    "readme-quality",
+		Version: "1.0.0",
+	}, nil)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "assess_readme",
+		Description: "Fetch a GitHub repository's README and run five AI quality probes, returning per-criterion scores, a verdict, and a narrative critique.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
+		if strings.TrimSpace(in.Slug) == "" {
+			return nil, Result{}, fmt.Errorf("slug is required")
+		}
+		res, err := runWorkflow(ctx, pool, in)
+		if err != nil {
+			return nil, Result{}, err
+		}
+		return nil, res, nil
+	})
+
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		log.Fatalf("mcp server: %v", err)
+	}
+}
+
+// ─── Entrypoint ────────────────────────────────────────────────────────────
+
+func main() {
+	var (
+		mcpMode = flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
+		slug    = flag.String("slug", "", "owner/repo slug, e.g. golang/go (CLI mode)")
+		fixture = flag.String("fixture", "", "path to a pre-saved README file, offline mode (CLI mode)")
+	)
+	flag.Parse()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	registerPredicates()
+
+	pool, err := ants.NewPool(10)
+	if err != nil {
+		log.Fatalf("create pool: %v", err)
+	}
+	defer pool.Release()
+
+	if *mcpMode {
+		runMCPServer(pool)
+		return
+	}
+
+	if *slug == "" && *fixture == "" {
+		fmt.Fprintln(os.Stderr, "usage: 03-readme-quality --slug <owner/repo>  |  --fixture <path>  |  --mcp")
+		os.Exit(2)
+	}
+	if *slug != "" && *fixture != "" {
+		fmt.Fprintln(os.Stderr, "specify exactly one of --slug or --fixture")
+		os.Exit(2)
+	}
+
+	// CLI keeps the offline convenience: resolve the data source here
+	// (live slug or --fixture) and feed the shared execution path.
+	var cfg runConfig
+	if *fixture != "" {
+		raw, err := os.ReadFile(*fixture)
+		if err != nil {
+			log.Fatalf("read fixture: %v", err)
+		}
+		cfg = runConfig{mode: sourceFixture, displaySlug: *fixture, readmeBody: string(raw)}
+	} else {
+		cfg = runConfig{
+			mode:        sourceLive,
+			displaySlug: *slug,
+			mainURL:     "https://raw.githubusercontent.com/" + *slug + "/main/README.md",
+			masterURL:   "https://raw.githubusercontent.com/" + *slug + "/master/README.md",
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	res, err := execute(ctx, pool, cfg)
+	if err != nil {
+		log.Fatalf("workflow: %v", err)
+	}
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(out); err != nil {
+	if err := enc.Encode(res); err != nil {
 		log.Fatalf("encode output: %v", err)
 	}
 }
