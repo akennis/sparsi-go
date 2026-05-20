@@ -40,7 +40,6 @@ import (
 	"github.com/akennis/sparsi-go/library"      // registers library ops
 	_ "github.com/wwz16/dagor/operator/builtin" // registers CoalesceNStringOp
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/reporter"
@@ -563,58 +562,71 @@ func buildGraph() (*graph.Graph, error) {
 		Build()
 }
 
-// ─── Workflow inputs / outputs ─────────────────────────────────────────────
+// ─── Driver ────────────────────────────────────────────────────────────────
 
-// UserInput is the external boundary of the workflow. In CLI mode it is filled
-// from --ticket (a file path); in MCP mode the SDK derives the tool input
-// schema from this struct and deserializes + validates every tools/call
-// request into it.
-type UserInput struct {
-	Ticket string `json:"ticket" jsonschema:"the full free-text customer-support ticket body to triage; required"`
-}
+func main() {
+	var ticketPath string
+	flag.StringVar(&ticketPath, "ticket", "", "path to a ticket text file")
+	flag.Parse()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-// Result is the workflow's structured output: the coalesced lane brief plus
-// the resolved category and the AI vertices that fired. Its shape varies by
-// lane (billing/bug/feature/other), so it is an open object. It is the MCP
-// tool's typed Out (the SDK emits it as structured content + a JSON text
-// block) and the CLI's stdout.
-type Result = map[string]any
+	if ticketPath == "" {
+		fmt.Fprintln(os.Stderr, "usage: 01-ticket-triager --ticket <file>")
+		os.Exit(2)
+	}
+	raw, err := os.ReadFile(ticketPath)
+	if err != nil {
+		log.Fatalf("read ticket: %v", err)
+	}
+	ticketBody := strings.TrimSpace(string(raw))
+	if ticketBody == "" {
+		log.Fatal("ticket file is empty")
+	}
 
-// ─── Shared execution path ─────────────────────────────────────────────────
+	registerPredicates()
 
-// runWorkflow is the single path shared by CLI and MCP modes. It builds a
-// fresh graph + engine per invocation so concurrent MCP tool calls never share
-// mutable operator state; the ants.Pool is safe to share. The ticket body is
-// injected via context.WithValue exactly as in CLI mode.
-func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
+	// Route every AI op through the per-cost-center factory so each vertex's
+	// credential_ref param maps onto its own CLAUDE_API_KEY_<COSTCENTER> env
+	// var. Must happen before the engine runs Setup() on any AI op.
+	library.SetDefaultAIClientFactory(&costCenterFactory{})
+
 	g, err := buildGraph()
 	if err != nil {
-		return nil, fmt.Errorf("build graph: %w", err)
+		log.Fatalf("build graph: %v", err)
 	}
+
+	pool, err := ants.NewPool(10)
+	if err != nil {
+		log.Fatalf("create pool: %v", err)
+	}
+	defer pool.Release()
 
 	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
 	if err != nil {
-		return nil, fmt.Errorf("create engine: %w", err)
+		log.Fatalf("create engine: %v", err)
 	}
 
-	ctx = context.WithValue(ctx, ticketBodyKey{}, strings.TrimSpace(in.Ticket))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	ctx, reasonLog := library.WithReasoningLog(ctx)
+	ctx = context.WithValue(ctx, ticketBodyKey{}, ticketBody)
 
 	if err := eng.Run(ctx); err != nil {
-		return nil, fmt.Errorf("run graph: %w", err)
+		log.Fatalf("run graph: %v", err)
 	}
 
 	briefRaw, ok := eng.GetOutput("final_brief")
 	if !ok {
-		return nil, fmt.Errorf("final_brief wire missing from graph output")
+		log.Fatal("final_brief wire missing from graph output")
 	}
 	briefPtr, ok := briefRaw.(*string)
 	if !ok || briefPtr == nil {
-		return nil, fmt.Errorf("unexpected final_brief type: %T", briefRaw)
+		log.Fatalf("unexpected final_brief type: %T", briefRaw)
 	}
 
-	var result Result
+	var result map[string]any
 	if err := json.Unmarshal([]byte(*briefPtr), &result); err != nil {
-		return nil, fmt.Errorf("parse final_brief: %w\nraw: %s", err, *briefPtr)
+		log.Fatalf("parse final_brief: %v\nraw: %s", err, *briefPtr)
 	}
 
 	if catRaw, ok := eng.GetOutput("ticket_category"); ok {
@@ -644,88 +656,6 @@ func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, er
 		}
 	}
 	result["ai_nodes"] = fired
-	return result, nil
-}
-
-// ─── MCP server mode ───────────────────────────────────────────────────────
-
-// runMCPServer exposes the workflow as one MCP tool over stdin/stdout. The SDK
-// infers the tool input schema from UserInput, auto-deserializes + validates
-// each request, and (because Out is non-any) emits Result as structured
-// content plus a JSON text block, so the handler returns nil for the result.
-func runMCPServer(pool *ants.Pool) {
-	server := mcp.NewServer(&mcp.Implementation{
-		Name:    "ticket-triager",
-		Version: "1.0.0",
-	}, nil)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "triage_ticket",
-		Description: "Classify a customer-support ticket (billing/bug/feature/other) and run the matching extraction lane, returning a structured brief plus the resolved category.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
-		if strings.TrimSpace(in.Ticket) == "" {
-			return nil, nil, fmt.Errorf("ticket is required")
-		}
-		res, err := runWorkflow(ctx, pool, in)
-		if err != nil {
-			return nil, nil, err
-		}
-		return nil, res, nil
-	})
-
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		log.Fatalf("mcp server: %v", err)
-	}
-}
-
-// ─── Entrypoint ────────────────────────────────────────────────────────────
-
-func main() {
-	mcpMode := flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
-	var ticketPath string
-	flag.StringVar(&ticketPath, "ticket", "", "path to a ticket text file (CLI mode)")
-	flag.Parse()
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
-
-	registerPredicates()
-
-	// Route every AI op through the per-cost-center factory so each vertex's
-	// credential_ref param maps onto its own CLAUDE_API_KEY_<COSTCENTER> env
-	// var. Must happen before the engine runs Setup() on any AI op.
-	library.SetDefaultAIClientFactory(&costCenterFactory{})
-
-	pool, err := ants.NewPool(10)
-	if err != nil {
-		log.Fatalf("create pool: %v", err)
-	}
-	defer pool.Release()
-
-	if *mcpMode {
-		runMCPServer(pool)
-		return
-	}
-
-	if ticketPath == "" {
-		fmt.Fprintln(os.Stderr, "usage: 01-ticket-triager --ticket <file> | --mcp")
-		os.Exit(2)
-	}
-	raw, err := os.ReadFile(ticketPath)
-	if err != nil {
-		log.Fatalf("read ticket: %v", err)
-	}
-	ticketBody := strings.TrimSpace(string(raw))
-	if ticketBody == "" {
-		log.Fatal("ticket file is empty")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	ctx, reasonLog := library.WithReasoningLog(ctx)
-
-	result, err := runWorkflow(ctx, pool, UserInput{Ticket: ticketBody})
-	if err != nil {
-		log.Fatalf("workflow: %v", err)
-	}
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

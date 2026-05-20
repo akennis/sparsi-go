@@ -39,7 +39,6 @@ import (
 
 	"github.com/akennis/sparsi-go/library"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/config"
@@ -409,17 +408,7 @@ func buildGraph(outDir string) (*graph.Graph, error) {
 
 // ─── Driver ────────────────────────────────────────────────────────────────
 
-// UserInput is the external boundary of the workflow. In CLI mode it is filled
-// from --query; in MCP mode the SDK derives the tool input schema from this
-// struct and deserializes + validates every tools/call request into it. The
-// screenshot output directory is operational config, not per-request input.
-type UserInput struct {
-	Query string `json:"query" jsonschema:"the search query to enter into Google before screenshotting the top results; required"`
-}
-
-// Result is the workflow's structured output: the MCP tool's typed Out (the
-// SDK emits it as structured content + a JSON text block) and the CLI's stdout.
-type Result struct {
+type runResult struct {
 	Query       string     `json:"query"`
 	OutDir      string     `json:"out_dir"`
 	Screenshots []shotInfo `json:"screenshots"`
@@ -437,106 +426,8 @@ type shotErr struct {
 	Error string `json:"error"`
 }
 
-// ─── Shared execution path ─────────────────────────────────────────────────
-
-// runWorkflow is the single path shared by CLI and MCP modes. It builds a
-// fresh graph + engine per invocation so concurrent MCP tool calls never share
-// mutable operator state; the ants.Pool and the shared playwright-mcp pool are
-// safe to share. The query is injected via context.WithValue exactly as in
-// CLI mode. outDir is resolved by the caller (operational config).
-func runWorkflow(ctx context.Context, pool *ants.Pool, outDir string, in UserInput) (Result, error) {
-	g, err := buildGraph(outDir)
-	if err != nil {
-		return Result{}, fmt.Errorf("build graph: %w", err)
-	}
-
-	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
-	if err != nil {
-		return Result{}, fmt.Errorf("create engine: %w", err)
-	}
-
-	ctx = context.WithValue(ctx, searchInputKey{}, SearchInput{Query: in.Query})
-
-	if err := eng.Run(ctx); err != nil {
-		return Result{}, fmt.Errorf("run graph: %w", err)
-	}
-
-	results := getCollectedShotResults(eng, "screenshot_results")
-
-	res := Result{
-		Query:       in.Query,
-		OutDir:      outDir,
-		Screenshots: []shotInfo{},
-	}
-	for _, r := range results {
-		if r.Error != "" {
-			res.Errors = append(res.Errors, shotErr{URL: r.URL, Error: r.Error})
-			continue
-		}
-		info := shotInfo{URL: r.URL, Path: r.Path}
-		if st, statErr := os.Stat(r.Path); statErr == nil {
-			info.Bytes = st.Size()
-		}
-		res.Screenshots = append(res.Screenshots, info)
-	}
-	return res, nil
-}
-
-// resolveOutDir applies the default (<cwd>/.playwright-mcp), enforces an
-// absolute path, and creates the directory. Shared by both modes.
-func resolveOutDir(flagVal string) (string, error) {
-	outDir := flagVal
-	if outDir == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("os.Getwd: %w", err)
-		}
-		outDir = filepath.Join(cwd, ".playwright-mcp")
-	} else if !filepath.IsAbs(outDir) {
-		return "", fmt.Errorf("--out-dir must be absolute")
-	}
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return "", fmt.Errorf("mkdir %s: %w", outDir, err)
-	}
-	return outDir, nil
-}
-
-// ─── MCP server mode ───────────────────────────────────────────────────────
-
-// runMCPServer exposes the workflow as one MCP tool over stdin/stdout. The SDK
-// infers the tool input schema from UserInput, auto-deserializes + validates
-// each request, and (because Out is non-any) emits Result as structured
-// content plus a JSON text block, so the handler returns nil for the result.
-func runMCPServer(pool *ants.Pool, outDir string) {
-	server := mcp.NewServer(&mcp.Implementation{
-		Name:    "local-mcp-server",
-		Version: "1.0.0",
-	}, nil)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "search_and_screenshot",
-		Description: "Google a query in a headless browser, take the first 3 result URLs, and screenshot each page in parallel. Returns the saved screenshot paths and any per-URL errors.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
-		if strings.TrimSpace(in.Query) == "" {
-			return nil, Result{}, fmt.Errorf("query is required")
-		}
-		res, err := runWorkflow(ctx, pool, outDir, in)
-		if err != nil {
-			return nil, Result{}, err
-		}
-		return nil, res, nil
-	})
-
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		log.Fatalf("mcp server: %v", err)
-	}
-}
-
-// ─── Entrypoint ────────────────────────────────────────────────────────────
-
 func main() {
-	mcpMode := flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
-	query := flag.String("query", "Shizuoka", "Search query to enter into Google (CLI mode)")
+	query := flag.String("query", "Shizuoka", "Search query to enter into Google")
 	outDir := flag.String("out-dir", "", "Absolute directory to write screenshots to (default: <cwd>/.playwright-mcp)")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	flag.Parse()
@@ -554,10 +445,23 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: &lvl})))
 
-	resolvedOutDir, err := resolveOutDir(*outDir)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	if *outDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			log.Fatalf("os.Getwd: %v", err)
+		}
+		*outDir = filepath.Join(cwd, ".playwright-mcp")
+	} else if !filepath.IsAbs(*outDir) {
+		fmt.Fprintln(os.Stderr, "--out-dir must be absolute")
 		os.Exit(2)
+	}
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+		log.Fatalf("mkdir %s: %v", *outDir, err)
+	}
+
+	g, err := buildGraph(*outDir)
+	if err != nil {
+		log.Fatalf("build graph: %v", err)
 	}
 
 	pool, err := ants.NewPool(8)
@@ -567,17 +471,36 @@ func main() {
 	defer pool.Release()
 	defer library.ShutdownMCPPool(context.Background())
 
-	if *mcpMode {
-		runMCPServer(pool, resolvedOutDir)
-		return
+	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
+	if err != nil {
+		log.Fatalf("create engine: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	ctx = context.WithValue(ctx, searchInputKey{}, SearchInput{Query: *query})
 
-	res, err := runWorkflow(ctx, pool, resolvedOutDir, UserInput{Query: *query})
-	if err != nil {
-		log.Fatalf("workflow: %v", err)
+	if err := eng.Run(ctx); err != nil {
+		log.Fatalf("run graph: %v", err)
+	}
+
+	results := getCollectedShotResults(eng, "screenshot_results")
+
+	res := runResult{
+		Query:       *query,
+		OutDir:      *outDir,
+		Screenshots: []shotInfo{},
+	}
+	for _, r := range results {
+		if r.Error != "" {
+			res.Errors = append(res.Errors, shotErr{URL: r.URL, Error: r.Error})
+			continue
+		}
+		info := shotInfo{URL: r.URL, Path: r.Path}
+		if st, statErr := os.Stat(r.Path); statErr == nil {
+			info.Bytes = st.Size()
+		}
+		res.Screenshots = append(res.Screenshots, info)
 	}
 
 	// Human-readable summary on stderr; machine-readable JSON on stdout.

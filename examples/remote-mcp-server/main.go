@@ -30,7 +30,6 @@ import (
 
 	"github.com/akennis/sparsi-go/library"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/graph"
@@ -89,97 +88,15 @@ func buildGraph() (*graph.Graph, error) {
 		Build()
 }
 
-// ─── Workflow inputs / outputs ─────────────────────────────────────────────
-
-// UserInput is the external boundary of the workflow. In CLI mode it is filled
-// from --query; in MCP mode the SDK derives the tool input schema from this
-// struct and deserializes + validates every tools/call request into it.
-type UserInput struct {
-	Query string `json:"query" jsonschema:"the search query to run against the Cloudflare documentation; required"`
-}
-
-// Result is the workflow's structured output: the MCP tool's typed Out (the
-// SDK emits it as structured content + a JSON text block) and the CLI's stdout.
-type Result struct {
-	Query   string `json:"query"`
-	Results string `json:"results"`
-}
-
-// ─── Shared execution path ─────────────────────────────────────────────────
-
-// runWorkflow is the single path shared by CLI and MCP modes. It builds a
-// fresh graph + engine per invocation so concurrent MCP tool calls never share
-// mutable operator state; the ants.Pool is safe to share. The query is
-// injected via context.WithValue exactly as in CLI mode.
-func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
-	g, err := buildGraph()
-	if err != nil {
-		return Result{}, fmt.Errorf("build graph: %w", err)
-	}
-
-	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
-	if err != nil {
-		return Result{}, fmt.Errorf("create engine: %w", err)
-	}
-
-	ctx = context.WithValue(ctx, searchInputKey{}, SearchInput{Query: in.Query})
-
-	if err := eng.Run(ctx); err != nil {
-		return Result{}, fmt.Errorf("run graph: %w", err)
-	}
-
-	raw, ok := eng.GetOutput("search_results")
-	if !ok {
-		return Result{}, fmt.Errorf("missing output: search_results")
-	}
-	sp, ok := raw.(*string)
-	if !ok || sp == nil {
-		return Result{}, fmt.Errorf("unexpected output type for search_results: %T", raw)
-	}
-	return Result{Query: in.Query, Results: *sp}, nil
-}
-
-// ─── MCP server mode ───────────────────────────────────────────────────────
-
-// runMCPServer exposes the workflow as one MCP tool over stdin/stdout. The SDK
-// infers the tool input schema from UserInput, auto-deserializes + validates
-// each request, and (because Out is non-any) emits Result as structured
-// content plus a JSON text block, so the handler returns nil for the result.
-//
-// Note this process is then both an MCP server (to its caller) and an MCP
-// client (of the remote Cloudflare docs server the graph queries).
-func runMCPServer(pool *ants.Pool) {
-	server := mcp.NewServer(&mcp.Implementation{
-		Name:    "remote-mcp-server",
-		Version: "1.0.0",
-	}, nil)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "search_cloudflare_docs",
-		Description: "Search the official Cloudflare documentation via the public remote MCP server and return the matching documentation text.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
-		if strings.TrimSpace(in.Query) == "" {
-			return nil, Result{}, fmt.Errorf("query is required")
-		}
-		res, err := runWorkflow(ctx, pool, in)
-		if err != nil {
-			return nil, Result{}, err
-		}
-		return nil, res, nil
-	})
-
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		log.Fatalf("mcp server: %v", err)
-	}
-}
-
-// ─── Entrypoint ────────────────────────────────────────────────────────────
-
 func main() {
-	mcpMode := flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
-	query := flag.String("query", "", "Search query for Cloudflare documentation (CLI mode)")
+	query := flag.String("query", "", "Search query for Cloudflare documentation (required)")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	flag.Parse()
+
+	if *query == "" {
+		fmt.Fprintln(os.Stderr, "--query is required")
+		os.Exit(2)
+	}
 
 	var lvl slog.LevelVar
 	switch strings.ToLower(*logLevel) {
@@ -194,30 +111,39 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: &lvl})))
 
+	g, err := buildGraph()
+	if err != nil {
+		log.Fatalf("build graph: %v", err)
+	}
+
 	pool, err := ants.NewPool(2)
 	if err != nil {
 		log.Fatalf("create pool: %v", err)
 	}
 	defer pool.Release()
 
-	if *mcpMode {
-		runMCPServer(pool)
-		return
-	}
-
-	if *query == "" {
-		fmt.Fprintln(os.Stderr, "--query is required (or pass --mcp to run as an MCP server)")
-		os.Exit(2)
+	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
+	if err != nil {
+		log.Fatalf("create engine: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	ctx = context.WithValue(ctx, searchInputKey{}, SearchInput{Query: *query})
 
-	res, err := runWorkflow(ctx, pool, UserInput{Query: *query})
-	if err != nil {
-		log.Fatalf("workflow: %v", err)
+	if err := eng.Run(ctx); err != nil {
+		log.Fatalf("run graph: %v", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "query: %q\n--- result ---\n", res.Query)
-	fmt.Println(res.Results)
+	raw, ok := eng.GetOutput("search_results")
+	if !ok {
+		log.Fatalf("missing output: search_results")
+	}
+	sp, ok := raw.(*string)
+	if !ok || sp == nil {
+		log.Fatalf("unexpected output type for search_results: %T", raw)
+	}
+
+	fmt.Fprintf(os.Stderr, "query: %q\n--- result ---\n", *query)
+	fmt.Println(*sp)
 }

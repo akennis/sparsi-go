@@ -25,7 +25,6 @@ import (
 	_ "github.com/akennis/sparsi-go/library"    // registers library ops
 	_ "github.com/wwz16/dagor/operator/builtin" // registers CoalesceNStringOp
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/reporter"
@@ -372,18 +371,7 @@ func buildGraph(query string) (*graph.Graph, error) {
 
 // ─── Driver ────────────────────────────────────────────────────────────────
 
-// UserInput is the external boundary of the workflow. In CLI mode it is filled
-// from --query; in MCP mode the SDK derives the tool input schema from this
-// struct and deserializes + validates every tools/call request into it. The
-// MCP path always fetches HN data live — the --cache/--fixture offline modes
-// are CLI-only conveniences resolved before the shared path.
-type UserInput struct {
-	Query string `json:"query" jsonschema:"the HackerNews search topic to fetch, classify, and brief; required"`
-}
-
-// Result is the workflow's structured output: the MCP tool's typed Out (the
-// SDK emits it as structured content + a JSON text block) and the CLI's stdout.
-type Result struct {
+type outputResult struct {
 	Query             string         `json:"query"`
 	StoryCount        int            `json:"story_count"`
 	KeptAfterFilter   int            `json:"kept_after_filter"`
@@ -394,30 +382,52 @@ type Result struct {
 	AINodes           []string       `json:"ai_nodes"`
 }
 
-// ─── Shared execution path ─────────────────────────────────────────────────
+func main() {
+	var (
+		query   = flag.String("query", "", "HackerNews search query")
+		cache   = flag.Bool("cache", false, "load fixture from testdata/hn/<query-slug>.json")
+		fixture = flag.String("fixture", "", "path to a pre-captured HN API response JSON file")
+	)
+	flag.Parse()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-// execute builds a fresh graph + engine for one query and the already-resolved
-// HN API response JSON, then extracts the structured Result. A fresh graph per
-// invocation keeps concurrent MCP tool calls from sharing mutable operator
-// state; the ants.Pool is safe to share.
-func execute(ctx context.Context, pool *ants.Pool, query, responseJSON string) (Result, error) {
-	g, err := buildGraph(query)
-	if err != nil {
-		return Result{}, fmt.Errorf("build graph: %w", err)
+	if *query == "" {
+		fmt.Fprintln(os.Stderr, "usage: 05-hn-topic-brief --query <term> [--cache | --fixture <path>]")
+		os.Exit(2)
 	}
+
+	responseJSON, err := fetchOrLoad(*query, *cache, *fixture)
+	if err != nil {
+		log.Fatalf("get HN data: %v", err)
+	}
+
+	registerPredicates()
+
+	g, err := buildGraph(*query)
+	if err != nil {
+		log.Fatalf("build graph: %v", err)
+	}
+
+	pool, err := ants.NewPool(10)
+	if err != nil {
+		log.Fatalf("create pool: %v", err)
+	}
+	defer pool.Release()
 
 	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
 	if err != nil {
-		return Result{}, fmt.Errorf("create engine: %w", err)
+		log.Fatalf("create engine: %v", err)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
 	ctx = context.WithValue(ctx, responseJSONKey{}, responseJSON)
 
 	if err := eng.Run(ctx); err != nil {
-		return Result{}, fmt.Errorf("run graph: %w", err)
+		log.Fatalf("run graph: %v", err)
 	}
 
-	out := Result{Query: query}
+	out := outputResult{Query: *query}
 
 	// total story count (from titles wire)
 	if raw, ok := eng.GetOutput("titles"); ok {
@@ -475,98 +485,10 @@ func execute(ctx context.Context, pool *ants.Pool, query, responseJSON string) (
 			out.AINodes = append(out.AINodes, c.label)
 		}
 	}
-	return out, nil
-}
-
-// runWorkflow is the live path shared by the MCP tool and CLI live mode: it
-// fetches the HN API response for the query, then runs the graph.
-func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
-	responseJSON, err := fetchOrLoad(in.Query, false, "")
-	if err != nil {
-		return Result{}, fmt.Errorf("get HN data: %w", err)
-	}
-	return execute(ctx, pool, in.Query, responseJSON)
-}
-
-// ─── MCP server mode ───────────────────────────────────────────────────────
-
-// runMCPServer exposes the workflow as one MCP tool over stdin/stdout. The SDK
-// infers the tool input schema from UserInput, auto-deserializes + validates
-// each request, and (because Out is non-any) emits Result as structured
-// content plus a JSON text block, so the handler returns nil for the result.
-func runMCPServer(pool *ants.Pool) {
-	server := mcp.NewServer(&mcp.Implementation{
-		Name:    "hn-topic-brief",
-		Version: "1.0.0",
-	}, nil)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "hn_topic_brief",
-		Description: "Fetch the top HackerNews stories for a topic, filter and classify them, then produce a brief in the dominant style (technical/business/policy).",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
-		if strings.TrimSpace(in.Query) == "" {
-			return nil, Result{}, fmt.Errorf("query is required")
-		}
-		res, err := runWorkflow(ctx, pool, in)
-		if err != nil {
-			return nil, Result{}, err
-		}
-		return nil, res, nil
-	})
-
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		log.Fatalf("mcp server: %v", err)
-	}
-}
-
-// ─── Entrypoint ────────────────────────────────────────────────────────────
-
-func main() {
-	var (
-		mcpMode = flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
-		query   = flag.String("query", "", "HackerNews search query (CLI mode)")
-		cache   = flag.Bool("cache", false, "load fixture from testdata/hn/<query-slug>.json (CLI mode)")
-		fixture = flag.String("fixture", "", "path to a pre-captured HN API response JSON file (CLI mode)")
-	)
-	flag.Parse()
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
-
-	registerPredicates()
-
-	pool, err := ants.NewPool(10)
-	if err != nil {
-		log.Fatalf("create pool: %v", err)
-	}
-	defer pool.Release()
-
-	if *mcpMode {
-		runMCPServer(pool)
-		return
-	}
-
-	if *query == "" {
-		fmt.Fprintln(os.Stderr, "usage: 05-hn-topic-brief --query <term> [--cache | --fixture <path>] | --mcp")
-		os.Exit(2)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	// CLI keeps the offline conveniences: resolve the raw payload here
-	// (live, --cache, or --fixture) and feed the shared execution path.
-	responseJSON, err := fetchOrLoad(*query, *cache, *fixture)
-	if err != nil {
-		log.Fatalf("get HN data: %v", err)
-	}
-
-	res, err := execute(ctx, pool, *query, responseJSON)
-	if err != nil {
-		log.Fatalf("workflow: %v", err)
-	}
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(res); err != nil {
+	if err := enc.Encode(out); err != nil {
 		log.Fatalf("encode output: %v", err)
 	}
 }
