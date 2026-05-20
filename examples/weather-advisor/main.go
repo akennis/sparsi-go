@@ -22,6 +22,7 @@ import (
 	_ "github.com/akennis/sparsi-go/library"    // registers library ops
 	_ "github.com/wwz16/dagor/operator/builtin" // registers CoalesceNStringOp
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/reporter"
@@ -350,7 +351,18 @@ func buildGraph(mode sourceMode) (*graph.Graph, error) {
 
 // ─── Output ────────────────────────────────────────────────────────────────
 
-type result struct {
+// UserInput is the external boundary of the workflow. In CLI mode it is filled
+// from --city; in MCP mode the SDK derives the tool input schema from this
+// struct and deserializes + validates every tools/call request into it. The
+// MCP path always queries wttr.in live — the --fixture offline mode is a
+// CLI-only convenience resolved before the shared path.
+type UserInput struct {
+	City string `json:"city" jsonschema:"the city name to fetch current weather for and advise an outfit; required"`
+}
+
+// Result is the workflow's structured output: the MCP tool's typed Out (the
+// SDK emits it as structured content + a JSON text block) and the CLI's stdout.
+type Result struct {
 	City       string   `json:"city"`
 	TempC      float64  `json:"temp_c"`
 	PrecipMM   float64  `json:"precip_mm"`
@@ -363,67 +375,32 @@ type result struct {
 	AINodes    []string `json:"ai_nodes"`
 }
 
-// ─── Main ──────────────────────────────────────────────────────────────────
+// runConfig is the resolved data source for one execution: either a live
+// wttr.in query URL or a pre-read fixture body.
+type runConfig struct {
+	mode      sourceMode
+	body      string
+	fullURL   string
+	cityLabel string
+}
 
-func main() {
-	var (
-		city    = flag.String("city", "", "city name for live wttr.in API")
-		fixture = flag.String("fixture", "", "path to captured wttr.in j1 JSON fixture")
-	)
-	flag.Parse()
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+// ─── Shared execution path ─────────────────────────────────────────────────
 
-	if *city == "" && *fixture == "" {
-		fmt.Fprintln(os.Stderr, "usage: 04-weather-advisor --city <name>  |  --fixture <path>")
-		os.Exit(2)
-	}
-	if *city != "" && *fixture != "" {
-		fmt.Fprintln(os.Stderr, "specify exactly one of --city or --fixture")
-		os.Exit(2)
-	}
-
-	var mode sourceMode
-	var body, fullURL string
-	cityLabel := *city
-
-	if *fixture != "" {
-		raw, err := os.ReadFile(*fixture)
-		if err != nil {
-			log.Fatalf("read fixture: %v", err)
-		}
-		mode = sourceFixture
-		body = string(raw)
-		// derive city label from filename
-		base := *fixture
-		if idx := strings.LastIndexAny(base, "/\\"); idx >= 0 {
-			base = base[idx+1:]
-		}
-		cityLabel = strings.TrimSuffix(base, ".json")
-	} else {
-		mode = sourceLive
-		fullURL = "https://wttr.in/" + url.PathEscape(*city) + "?format=j1"
-	}
-
-	registerPredicates()
-
-	g, err := buildGraph(mode)
+// execute builds a fresh graph + engine for one resolved runConfig and
+// extracts the structured Result. A fresh graph per invocation keeps
+// concurrent MCP tool calls from sharing mutable operator state; the
+// ants.Pool is safe to share.
+func execute(ctx context.Context, pool *ants.Pool, cfg runConfig) (Result, error) {
+	g, err := buildGraph(cfg.mode)
 	if err != nil {
-		log.Fatalf("build graph: %v", err)
+		return Result{}, fmt.Errorf("build graph: %w", err)
 	}
-
-	pool, err := ants.NewPool(10)
-	if err != nil {
-		log.Fatalf("create pool: %v", err)
-	}
-	defer pool.Release()
 
 	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
 	if err != nil {
-		log.Fatalf("create engine: %v", err)
+		return Result{}, fmt.Errorf("create engine: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
 	ctx = context.WithValue(ctx, precipThreshKey{}, 0.1)
 	ctx = context.WithValue(ctx, windThreshKey{}, 25.0)
 	ctx = context.WithValue(ctx, warningKey{}, "  ⚠ unusual weather")
@@ -435,25 +412,25 @@ func main() {
 	ctx = context.WithValue(ctx, coldBandKey{}, "cold")
 	ctx = context.WithValue(ctx, mildBandKey{}, "mild")
 	ctx = context.WithValue(ctx, hotBandKey{}, "hot")
-	if mode == sourceFixture {
-		ctx = context.WithValue(ctx, bodyKey{}, body)
+	if cfg.mode == sourceFixture {
+		ctx = context.WithValue(ctx, bodyKey{}, cfg.body)
 	} else {
-		ctx = context.WithValue(ctx, urlKey{}, fullURL)
+		ctx = context.WithValue(ctx, urlKey{}, cfg.fullURL)
 	}
 
 	if err := eng.Run(ctx); err != nil {
-		log.Fatalf("run graph: %v", err)
+		return Result{}, fmt.Errorf("run graph: %w", err)
 	}
 
-	if mode == sourceLive {
+	if cfg.mode == sourceLive {
 		if statusRaw, ok := eng.GetOutput("http_status"); ok {
 			if status, ok2 := statusRaw.(*int); ok2 && status != nil && *status != 200 {
-				log.Fatalf("HTTP fetch returned status %d", *status)
+				return Result{}, fmt.Errorf("HTTP fetch returned status %d", *status)
 			}
 		}
 	}
 
-	out := result{City: cityLabel}
+	out := Result{City: cfg.cityLabel}
 
 	if v, ok := getFloat(eng, "temp_c"); ok {
 		out.TempC = v
@@ -492,10 +469,121 @@ func main() {
 			out.AINodes = append(out.AINodes, c.op)
 		}
 	}
+	return out, nil
+}
+
+// runWorkflow is the live path shared by the MCP tool and CLI live mode: it
+// builds the wttr.in query URL for the city, then runs the graph.
+func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
+	cfg := runConfig{
+		mode:      sourceLive,
+		cityLabel: in.City,
+		fullURL:   "https://wttr.in/" + url.PathEscape(in.City) + "?format=j1",
+	}
+	return execute(ctx, pool, cfg)
+}
+
+// ─── MCP server mode ───────────────────────────────────────────────────────
+
+// runMCPServer exposes the workflow as one MCP tool over stdin/stdout. The SDK
+// infers the tool input schema from UserInput, auto-deserializes + validates
+// each request, and (because Out is non-any) emits Result as structured
+// content plus a JSON text block, so the handler returns nil for the result.
+func runMCPServer(pool *ants.Pool) {
+	server := mcp.NewServer(&mcp.Implementation{
+		Name:    "weather-advisor",
+		Version: "1.0.0",
+	}, nil)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "advise_outfit",
+		Description: "Fetch current weather for a city, derive temperature band and wet/windy flags, classify conditions, and return an AI outfit recommendation.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
+		if strings.TrimSpace(in.City) == "" {
+			return nil, Result{}, fmt.Errorf("city is required")
+		}
+		res, err := runWorkflow(ctx, pool, in)
+		if err != nil {
+			return nil, Result{}, err
+		}
+		return nil, res, nil
+	})
+
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		log.Fatalf("mcp server: %v", err)
+	}
+}
+
+// ─── Entrypoint ────────────────────────────────────────────────────────────
+
+func main() {
+	var (
+		mcpMode = flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
+		city    = flag.String("city", "", "city name for live wttr.in API (CLI mode)")
+		fixture = flag.String("fixture", "", "path to captured wttr.in j1 JSON fixture (CLI mode)")
+	)
+	flag.Parse()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	registerPredicates()
+
+	pool, err := ants.NewPool(10)
+	if err != nil {
+		log.Fatalf("create pool: %v", err)
+	}
+	defer pool.Release()
+
+	if *mcpMode {
+		runMCPServer(pool)
+		return
+	}
+
+	if *city == "" && *fixture == "" {
+		fmt.Fprintln(os.Stderr, "usage: 04-weather-advisor --city <name>  |  --fixture <path>  |  --mcp")
+		os.Exit(2)
+	}
+	if *city != "" && *fixture != "" {
+		fmt.Fprintln(os.Stderr, "specify exactly one of --city or --fixture")
+		os.Exit(2)
+	}
+
+	// CLI keeps the offline convenience: resolve the data source here
+	// (live city or --fixture) and feed the shared execution path.
+	var cfg runConfig
+	if *fixture != "" {
+		raw, err := os.ReadFile(*fixture)
+		if err != nil {
+			log.Fatalf("read fixture: %v", err)
+		}
+		// derive city label from filename
+		base := *fixture
+		if idx := strings.LastIndexAny(base, "/\\"); idx >= 0 {
+			base = base[idx+1:]
+		}
+		cfg = runConfig{
+			mode:      sourceFixture,
+			body:      string(raw),
+			cityLabel: strings.TrimSuffix(base, ".json"),
+		}
+	} else {
+		cfg = runConfig{
+			mode:      sourceLive,
+			cityLabel: *city,
+			fullURL:   "https://wttr.in/" + url.PathEscape(*city) + "?format=j1",
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	res, err := execute(ctx, pool, cfg)
+	if err != nil {
+		log.Fatalf("workflow: %v", err)
+	}
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(out); err != nil {
+	if err := enc.Encode(res); err != nil {
 		log.Fatalf("encode output: %v", err)
 	}
 }

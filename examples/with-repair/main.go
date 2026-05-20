@@ -50,6 +50,7 @@ import (
 
 	"github.com/akennis/sparsi-go/library"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/config"
@@ -340,28 +341,94 @@ func buildGraph() (*graph.Graph, error) {
 		Build()
 }
 
-// ─── Driver ────────────────────────────────────────────────────────────────
+// ─── Workflow inputs / outputs ─────────────────────────────────────────────
+
+// UserInput is the external boundary of the workflow. In CLI mode it is filled
+// from --input; in MCP mode the SDK derives the tool input schema from this
+// struct and deserializes + validates every tools/call request into it.
+type UserInput struct {
+	Input string `json:"input" jsonschema:"the raw support-ticket JSON to parse, repair, and validate; required"`
+}
+
+// Result is the workflow's structured output: the validated, repaired ticket.
+// It is the MCP tool's typed Out (the SDK emits it as structured content + a
+// JSON text block) and the CLI's stdout.
+type Result = TicketInput
+
+// ─── Shared execution path ─────────────────────────────────────────────────
+
+// runWorkflow is the single path shared by CLI and MCP modes. It builds a
+// fresh graph + engine per invocation so concurrent MCP tool calls never share
+// mutable operator state; the ants.Pool is safe to share. The raw ticket is
+// injected via context.WithValue exactly as in CLI mode.
+func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
+	g, err := buildGraph()
+	if err != nil {
+		return Result{}, fmt.Errorf("build graph: %w", err)
+	}
+
+	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
+	if err != nil {
+		return Result{}, fmt.Errorf("create engine: %w", err)
+	}
+
+	ctx = context.WithValue(ctx, rawTicketKey{}, TicketRaw{Text: in.Input})
+
+	if err := eng.Run(ctx); err != nil {
+		return Result{}, fmt.Errorf("run graph: %w", err)
+	}
+
+	out, ok := eng.GetOutput("validated")
+	if !ok {
+		return Result{}, fmt.Errorf("no \"validated\" output produced")
+	}
+	ticket, ok := out.(*TicketInput)
+	if !ok || ticket == nil {
+		return Result{}, fmt.Errorf("unexpected output type %T", out)
+	}
+	return *ticket, nil
+}
+
+// ─── MCP server mode ───────────────────────────────────────────────────────
+
+// runMCPServer exposes the workflow as one MCP tool over stdin/stdout. The SDK
+// infers the tool input schema from UserInput, auto-deserializes + validates
+// each request, and (because Out is non-any) emits Result as structured
+// content plus a JSON text block, so the handler returns nil for the result.
+func runMCPServer(pool *ants.Pool) {
+	server := mcp.NewServer(&mcp.Implementation{
+		Name:    "with-repair",
+		Version: "1.0.0",
+	}, nil)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "parse_and_validate_ticket",
+		Description: "Parse a raw support-ticket JSON payload, AI-repairing JSON/schema errors and business-rule violations, and return the validated ticket.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
+		if strings.TrimSpace(in.Input) == "" {
+			return nil, Result{}, fmt.Errorf("input is required")
+		}
+		res, err := runWorkflow(ctx, pool, in)
+		if err != nil {
+			return nil, Result{}, err
+		}
+		return nil, res, nil
+	})
+
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		log.Fatalf("mcp server: %v", err)
+	}
+}
+
+// ─── Entrypoint ────────────────────────────────────────────────────────────
 
 func main() {
-	input := flag.String("input", "", "raw ticket JSON, or @path to read from a file")
-	reasoning := flag.Bool("reasoning", false, "enable the reasoning log and print repair traces to stderr")
+	mcpMode := flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
+	input := flag.String("input", "", "raw ticket JSON, or @path to read from a file (CLI mode)")
+	reasoning := flag.Bool("reasoning", false, "enable the reasoning log and print repair traces to stderr (CLI mode)")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
-
-	if *input == "" {
-		fmt.Fprintln(os.Stderr, "usage: with-repair --input '<json>' | --input @path/to/file.json [--reasoning]")
-		os.Exit(2)
-	}
-	raw, err := readInput(*input)
-	if err != nil {
-		log.Fatalf("read input: %v", err)
-	}
-
-	g, err := buildGraph()
-	if err != nil {
-		log.Fatalf("build graph: %v", err)
-	}
 
 	pool, err := ants.NewPool(4)
 	if err != nil {
@@ -369,36 +436,36 @@ func main() {
 	}
 	defer pool.Release()
 
-	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
+	if *mcpMode {
+		runMCPServer(pool)
+		return
+	}
+
+	if *input == "" {
+		fmt.Fprintln(os.Stderr, "usage: with-repair --input '<json>' | --input @path/to/file.json [--reasoning] | --mcp")
+		os.Exit(2)
+	}
+	raw, err := readInput(*input)
 	if err != nil {
-		log.Fatalf("create engine: %v", err)
+		log.Fatalf("read input: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	ctx = context.WithValue(ctx, rawTicketKey{}, TicketRaw{Text: raw})
 
 	var rlog *library.ReasoningLog
 	if *reasoning {
 		ctx, rlog = library.WithReasoningLog(ctx)
 	}
 
-	if err := eng.Run(ctx); err != nil {
-		log.Fatalf("run graph: %v", err)
-	}
-
-	out, ok := eng.GetOutput("validated")
-	if !ok {
-		log.Fatalf("no \"validated\" output produced")
-	}
-	ticket, ok := out.(*TicketInput)
-	if !ok {
-		log.Fatalf("unexpected output type %T", out)
+	res, err := runWorkflow(ctx, pool, UserInput{Input: raw})
+	if err != nil {
+		log.Fatalf("workflow: %v", err)
 	}
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(ticket); err != nil {
+	if err := enc.Encode(res); err != nil {
 		log.Fatalf("encode output: %v", err)
 	}
 

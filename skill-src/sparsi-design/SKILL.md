@@ -17,6 +17,20 @@ deterministic alternative exists.
 
 **API Key Configuration:** For LLM providers (Claude, Gemini), assume the API keys (`CLAUDE_API_KEY`, `GEMINI_API_KEY`) are already set. For all other third-party APIs (search engines, vector stores, etc.), do not assume they are set; instead, explicitly tell the user to set them as environment variables. In all cases, do not design complex credential-fetching logic (e.g., Vault, Secret Manager) unless explicitly requested; rely on standard environment-based lookup (e.g., `EnvAIClientFactory`).
 
+# Dual-mode runtime (CLI + MCP server)
+
+Every generated program is dual-mode: a one-shot CLI tool by default, or a
+local stdin/stdout MCP server when invoked with `-mcp`. In MCP mode the whole
+workflow is exposed as **one MCP tool**; every external input is deserialized
+out of the incoming `tools/call` request, and the final outputs are returned as
+the tool result. This is invisible to the DAG itself — the same graph runs in
+both modes — but the design MUST precisely enumerate the workflow's external
+inputs and final outputs, because codegen turns them directly into the MCP
+tool's input/output JSON schema. Capture this in the `### MCP Interface` block
+of the output. (This concerns the program *acting as* an MCP server; it is
+unrelated to `MCPCallOp`/`MCPScriptOp`, which make the workflow a *client* of
+some other MCP server.)
+
 Read the following references before producing any output:
 1. `references/library.md` — all 91 op descriptions grouped by category
 2. `references/design-rules.md` — design constraints, anti-patterns, and required patterns
@@ -418,6 +432,24 @@ Respond ONLY with the following structured document. No Go code. No markdown out
 [diagram showing vertices and data flow with → arrows; vertices wrapped by
 `library.WithRepair` carry a trailing `[AI:WithRepair]` tag — see
 "AI-WRAPPED VERTICES — RENDERER HINT" in `references/design-rules.md`]
+
+### MCP Interface
+The external boundary of the workflow — codegen turns this verbatim into the
+`UserInput` struct, the `Result` struct, and the single MCP tool.
+
+- **Tool name**: `snake_case_verb` — a short imperative tool id
+- **Tool description**: one sentence the MCP client sees
+- **Inputs** (one row per external value entering the DAG; each becomes a
+  `UserInput` field and an MCP tool argument):
+  - `field_name` (type, required|optional) — description; which `ContextValOp`
+    wire it feeds
+- **Outputs** (one row per value returned to the caller; each becomes a
+  `Result` field read from an engine output wire):
+  - `field_name` (type) — description; source `wire_name`
+
+Every value listed under Inputs MUST also appear as the source of a
+`ContextValOp` vertex in **Vertices** (inputs never use `eng.SetInput`). Every
+value under Outputs MUST be a wire produced by some vertex.
 
 ### Vertices
 List each vertex in topological order:

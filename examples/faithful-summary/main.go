@@ -9,6 +9,10 @@
 // This cross-model pattern is motivated by the fact that a model which
 // generated a summary has already committed to its framing — a second,
 // independent model is more likely to surface unsupported claims.
+//
+// The program is dual-mode: a one-shot CLI tool by default, or a local
+// stdin/stdout MCP server when invoked with -mcp (exposing the workflow as a
+// single MCP tool whose input is deserialized out of each tools/call request).
 package main
 
 import (
@@ -23,6 +27,7 @@ import (
 
 	_ "github.com/akennis/sparsi-go/library"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/config"
@@ -125,62 +130,47 @@ func buildGraph() (*graph.Graph, error) {
 		Build()
 }
 
-// ─── Driver ────────────────────────────────────────────────────────────────
+// ─── Workflow inputs / outputs ─────────────────────────────────────────────
 
-type result struct {
+// UserInput is the external boundary of the workflow. In CLI mode it is filled
+// from --file/--text; in MCP mode the SDK derives the tool input schema from
+// this struct and deserializes + validates every tools/call request into it.
+type UserInput struct {
+	Text string `json:"text" jsonschema:"the full source document text to summarize and fact-check; required"`
+}
+
+// Result is the workflow's structured output: the MCP tool's typed Out (the
+// SDK emits it as structured content + a JSON text block) and the CLI's stdout.
+type Result struct {
 	SourceLength int    `json:"source_length"`
 	Summary      string `json:"summary"`
 	Faithful     bool   `json:"faithful"`
 }
 
-func main() {
-	file := flag.String("file", "", "path to a text file to summarize")
-	text := flag.String("text", "", "inline source text to summarize")
-	flag.Parse()
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+// ─── Shared execution path ─────────────────────────────────────────────────
 
-	if (*file == "") == (*text == "") {
-		fmt.Fprintln(os.Stderr, "usage: 06-faithful-summary --file <path>  |  --text <text>")
-		os.Exit(2)
-	}
-
-	var source string
-	if *file != "" {
-		raw, err := os.ReadFile(*file)
-		if err != nil {
-			log.Fatalf("read file: %v", err)
-		}
-		source = string(raw)
-	} else {
-		source = *text
-	}
-
+// runWorkflow is the single path shared by CLI and MCP modes. It builds a
+// fresh graph + engine per invocation so concurrent MCP tool calls never share
+// mutable operator state; the ants.Pool is safe to share. The input is
+// injected via context.WithValue (NOT eng.SetInput) exactly as in CLI mode.
+func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
 	g, err := buildGraph()
 	if err != nil {
-		log.Fatalf("build graph: %v", err)
+		return Result{}, fmt.Errorf("build graph: %w", err)
 	}
-
-	pool, err := ants.NewPool(10)
-	if err != nil {
-		log.Fatalf("create pool: %v", err)
-	}
-	defer pool.Release()
 
 	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
 	if err != nil {
-		log.Fatalf("create engine: %v", err)
+		return Result{}, fmt.Errorf("create engine: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	ctx = context.WithValue(ctx, sourceKey{}, source)
+	ctx = context.WithValue(ctx, sourceKey{}, in.Text)
 
 	if err := eng.Run(ctx); err != nil {
-		log.Fatalf("run graph: %v", err)
+		return Result{}, fmt.Errorf("run graph: %w", err)
 	}
 
-	out := result{SourceLength: len(source)}
-
+	out := Result{SourceLength: len(in.Text)}
 	if raw, ok := eng.GetOutput("summary"); ok {
 		if p, ok := raw.(*string); ok && p != nil {
 			out.Summary = *p
@@ -191,10 +181,88 @@ func main() {
 			out.Faithful = *p
 		}
 	}
+	return out, nil
+}
+
+// ─── MCP server mode ───────────────────────────────────────────────────────
+
+// runMCPServer exposes the workflow as one MCP tool over stdin/stdout. The SDK
+// infers the tool input schema from UserInput, auto-deserializes + validates
+// each request, and (because Out is non-any) emits Result as structured
+// content plus a JSON text block, so the handler returns nil for the result.
+func runMCPServer(pool *ants.Pool) {
+	server := mcp.NewServer(&mcp.Implementation{
+		Name:    "faithful-summary",
+		Version: "1.0.0",
+	}, nil)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "summarize_and_verify",
+		Description: "Summarize a source document with Claude, then independently fact-check that summary with Gemini. Returns the generated summary and whether every claim in it is grounded in the source.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
+		// in is already deserialized + schema-validated from the request.
+		if in.Text == "" {
+			return nil, Result{}, fmt.Errorf("text is required")
+		}
+		res, err := runWorkflow(ctx, pool, in)
+		if err != nil {
+			return nil, Result{}, err // surfaced to the client as an error result
+		}
+		return nil, res, nil
+	})
+
+	// StdioTransport: newline-delimited JSON over this process's stdin/stdout.
+	// server.Run blocks until the client disconnects or ctx is cancelled.
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		log.Fatalf("mcp server: %v", err)
+	}
+}
+
+// ─── Entrypoint ────────────────────────────────────────────────────────────
+
+func main() {
+	mcpMode := flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
+	file := flag.String("file", "", "path to a text file to summarize (CLI mode)")
+	text := flag.String("text", "", "inline source text to summarize (CLI mode)")
+	flag.Parse()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	pool, err := ants.NewPool(10)
+	if err != nil {
+		log.Fatalf("create pool: %v", err)
+	}
+	defer pool.Release()
+
+	if *mcpMode {
+		runMCPServer(pool)
+		return
+	}
+
+	if (*file == "") == (*text == "") {
+		fmt.Fprintln(os.Stderr, "usage: 06-faithful-summary --file <path> | --text <text> | --mcp")
+		os.Exit(2)
+	}
+
+	source := *text
+	if *file != "" {
+		raw, err := os.ReadFile(*file)
+		if err != nil {
+			log.Fatalf("read file: %v", err)
+		}
+		source = string(raw)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	res, err := runWorkflow(ctx, pool, UserInput{Text: source})
+	if err != nil {
+		log.Fatalf("workflow: %v", err)
+	}
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(out); err != nil {
+	if err := enc.Encode(res); err != nil {
 		log.Fatalf("encode output: %v", err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/akennis/sparsi-go/library"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/graph"
@@ -155,8 +156,91 @@ func buildGraph() (*graph.Graph, error) {
 	return b.Build()
 }
 
+// ─── Workflow inputs / outputs ─────────────────────────────────────────────
+
+// UserInput is the external boundary of the workflow. In CLI mode it is filled
+// from --ticker; in MCP mode the SDK derives the tool input schema from this
+// struct and deserializes + validates every tools/call request into it.
+type UserInput struct {
+	Ticker string `json:"ticker" jsonschema:"the stock ticker symbol to analyze, e.g. AAPL; required"`
+}
+
+// Result is the workflow's structured output: the MCP tool's typed Out (the
+// SDK emits it as structured content + a JSON text block) and the CLI's stdout.
+type Result struct {
+	Ticker         string `json:"ticker"`
+	Recommendation string `json:"recommendation"`
+}
+
+// ─── Shared execution path ─────────────────────────────────────────────────
+
+// runWorkflow is the single path shared by CLI and MCP modes. It builds a
+// fresh graph + engine per invocation so concurrent MCP tool calls never share
+// mutable operator state; the ants.Pool is safe to share. The input is
+// injected via context.WithValue exactly as in CLI mode.
+func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
+	g, err := buildGraph()
+	if err != nil {
+		return Result{}, fmt.Errorf("build graph: %w", err)
+	}
+
+	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
+	if err != nil {
+		return Result{}, fmt.Errorf("create engine: %w", err)
+	}
+
+	ticker := strings.ToUpper(in.Ticker)
+	ctx = context.WithValue(ctx, tickerKey{}, ticker)
+
+	if err := eng.Run(ctx); err != nil {
+		return Result{}, fmt.Errorf("run graph: %w", err)
+	}
+
+	out := Result{Ticker: ticker}
+	if raw, ok := eng.GetOutput("recommendation"); ok {
+		if p, ok := raw.(*string); ok && p != nil {
+			out.Recommendation = *p
+		}
+	}
+	return out, nil
+}
+
+// ─── MCP server mode ───────────────────────────────────────────────────────
+
+// runMCPServer exposes the workflow as one MCP tool over stdin/stdout. The SDK
+// infers the tool input schema from UserInput, auto-deserializes + validates
+// each request, and (because Out is non-any) emits Result as structured
+// content plus a JSON text block, so the handler returns nil for the result.
+func runMCPServer(pool *ants.Pool) {
+	server := mcp.NewServer(&mcp.Implementation{
+		Name:    "stock-analyzer",
+		Version: "1.0.0",
+	}, nil)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "analyze_stock",
+		Description: "Fetch live quote and news for a stock ticker, score headline sentiment, and return a Buy/Hold/Sell recommendation with a one-sentence rationale.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
+		if strings.TrimSpace(in.Ticker) == "" {
+			return nil, Result{}, fmt.Errorf("ticker is required")
+		}
+		res, err := runWorkflow(ctx, pool, in)
+		if err != nil {
+			return nil, Result{}, err
+		}
+		return nil, res, nil
+	})
+
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		log.Fatalf("mcp server: %v", err)
+	}
+}
+
+// ─── Entrypoint ────────────────────────────────────────────────────────────
+
 func main() {
-	ticker := flag.String("ticker", "AAPL", "Stock ticker to analyze")
+	mcpMode := flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
+	ticker := flag.String("ticker", "AAPL", "Stock ticker to analyze (CLI mode)")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	flag.Parse()
 
@@ -178,40 +262,26 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: &lvl})))
 
-	g, err := buildGraph()
-	if err != nil {
-		log.Fatalf("build graph: %v", err)
-	}
-
 	pool, err := ants.NewPool(4)
 	if err != nil {
 		log.Fatalf("create pool: %v", err)
 	}
 	defer pool.Release()
 
-	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
-	if err != nil {
-		log.Fatalf("create engine: %v", err)
+	if *mcpMode {
+		runMCPServer(pool)
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	ctx = context.WithValue(ctx, tickerKey{}, strings.ToUpper(*ticker))
 
-	if err := eng.Run(ctx); err != nil {
-		log.Fatalf("run graph: %v", err)
+	res, err := runWorkflow(ctx, pool, UserInput{Ticker: *ticker})
+	if err != nil {
+		log.Fatalf("workflow: %v", err)
 	}
 
-	raw, ok := eng.GetOutput("recommendation")
-	if !ok {
-		log.Fatalf("missing output: recommendation")
-	}
-	rec, ok := raw.(*string)
-	if !ok || rec == nil {
-		log.Fatalf("unexpected output type: %T", raw)
-	}
-
-	fmt.Printf("\nAnalysis for %s:\n", strings.ToUpper(*ticker))
+	fmt.Printf("\nAnalysis for %s:\n", res.Ticker)
 	fmt.Println("-----------------------------------")
-	fmt.Println(*rec)
+	fmt.Println(res.Recommendation)
 }
