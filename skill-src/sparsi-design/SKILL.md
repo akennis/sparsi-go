@@ -17,20 +17,6 @@ deterministic alternative exists.
 
 **API Key Configuration:** For LLM providers (Claude, Gemini), assume the API keys (`CLAUDE_API_KEY`, `GEMINI_API_KEY`) are already set. For all other third-party APIs (search engines, vector stores, etc.), do not assume they are set; instead, explicitly tell the user to set them as environment variables. In all cases, do not design complex credential-fetching logic (e.g., Vault, Secret Manager) unless explicitly requested; rely on standard environment-based lookup (e.g., `EnvAIClientFactory`).
 
-# Dual-mode runtime (CLI + MCP server)
-
-Every generated program is dual-mode: a one-shot CLI tool by default, or a
-local stdin/stdout MCP server when invoked with `-mcp`. In MCP mode the whole
-workflow is exposed as **one MCP tool**; every external input is deserialized
-out of the incoming `tools/call` request, and the final outputs are returned as
-the tool result. This is invisible to the DAG itself — the same graph runs in
-both modes — but the design MUST precisely enumerate the workflow's external
-inputs and final outputs, because codegen turns them directly into the MCP
-tool's input/output JSON schema. Capture this in the `### MCP Interface` block
-of the output. (This concerns the program *acting as* an MCP server; it is
-unrelated to `MCPCallOp`/`MCPScriptOp`, which make the workflow a *client* of
-some other MCP server.)
-
 Read the following references before producing any output:
 1. `references/library.md` — all 91 op descriptions grouped by category
 2. `references/design-rules.md` — design constraints, anti-patterns, and required patterns
@@ -405,6 +391,18 @@ Do this before or as part of presenting your initial design.
 8. If the user provides feedback, incorporate it and redraft. Repeat until explicit approval.
 9. The final approved design is the output — do not proceed to code generation.
 
+# LLM Efficiency & Token Usage
+
+Every token sent to an LLM adds cost and latency. When a workflow fetches data from an external API, database, or MCP server to provide context for an AI op, you MUST design the fetching and processing steps to be as surgical as possible. Do NOT pass the entire result of an API call to the LLM if only a small subset is relevant.
+
+**Efficiency patterns:**
+1. **Filtering at the source:** Use API-side filtering (query params, SQL `WHERE` clauses, search filters) to reduce the initial payload size.
+2. **Deterministic pruning:** Use deterministic ops to filter, slice, or summarize the fetched data before it reaches the AI op. For example, if you fetch a large dataset but only need the most recent entries or specific metrics, use deterministic ops (or custom ops) to truncate or aggregate the data.
+3. **Structured extraction:** If you fetch a large JSON blob but only need a few fields, use `JSONExtractOp` or a custom parse op to extract only those fields.
+4. **Summarization fallback:** Only use `AISummarizeOp` to shorten context if deterministic pruning is impossible (e.g., the data is unstructured natural language).
+
+In your **Design Rationale**, explicitly mention how you are minimizing token usage for any vertex that feeds external data into an AI op.
+
 # Refinement loop
 
 After presenting a design, wait for user feedback. Refine based on feedback and re-present.
@@ -420,24 +418,6 @@ Respond ONLY with the following structured document. No Go code. No markdown out
 [diagram showing vertices and data flow with → arrows; vertices wrapped by
 `library.WithRepair` carry a trailing `[AI:WithRepair]` tag — see
 "AI-WRAPPED VERTICES — RENDERER HINT" in `references/design-rules.md`]
-
-### MCP Interface
-The external boundary of the workflow — codegen turns this verbatim into the
-`UserInput` struct, the `Result` struct, and the single MCP tool.
-
-- **Tool name**: `snake_case_verb` — a short imperative tool id
-- **Tool description**: one sentence the MCP client sees
-- **Inputs** (one row per external value entering the DAG; each becomes a
-  `UserInput` field and an MCP tool argument):
-  - `field_name` (type, required|optional) — description; which `ContextValOp`
-    wire it feeds
-- **Outputs** (one row per value returned to the caller; each becomes a
-  `Result` field read from an engine output wire):
-  - `field_name` (type) — description; source `wire_name`
-
-Every value listed under Inputs MUST also appear as the source of a
-`ContextValOp` vertex in **Vertices** (inputs never use `eng.SetInput`). Every
-value under Outputs MUST be a wire produced by some vertex.
 
 ### Vertices
 List each vertex in topological order:

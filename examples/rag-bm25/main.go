@@ -36,7 +36,6 @@ import (
 
 	"github.com/akennis/sparsi-go/library"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/config"
@@ -411,73 +410,66 @@ func loadKB(dir string) ([]library.Document, error) {
 	return docs, nil
 }
 
-// ─── Workflow inputs / outputs ─────────────────────────────────────────────
+// ─── Driver ────────────────────────────────────────────────────────────────
 
-// UserInput is the external boundary of the workflow. In CLI mode it is filled
-// from --question; in MCP mode the SDK derives the tool input schema from this
-// struct and deserializes + validates every tools/call request into it. The
-// knowledge base is process-global state loaded before either mode starts, so
-// it is not part of the per-request input.
-type UserInput struct {
-	Question string `json:"question" jsonschema:"the question to answer using the loaded knowledge base; required"`
-}
+func main() {
+	question := flag.String("question", "", "the question to answer using the knowledge base")
+	kbDir := flag.String("kb", "testdata/kb", "directory of .txt knowledge base files")
+	flag.Parse()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
-// Passage is one retrieved KB document, identified by its source filename and
-// BM25 score.
-type Passage struct {
-	Source string  `json:"source"`
-	Score  float64 `json:"score"`
-}
+	if strings.TrimSpace(*question) == "" {
+		fmt.Fprintln(os.Stderr, "usage: rag-bm25 --question \"<your question>\" [--kb <dir>]")
+		os.Exit(2)
+	}
 
-// Result is the workflow's structured output: the MCP tool's typed Out (the
-// SDK emits it as structured content + a JSON text block) and the CLI's
-// stdout. Sources is post-validation — hallucinated citations are dropped.
-type Result struct {
-	Answer    string    `json:"answer"`
-	Sources   []string  `json:"sources"`
-	Retrieved []Passage `json:"retrieved"`
-}
+	docs, err := loadKB(*kbDir)
+	if err != nil {
+		log.Fatalf("load knowledge base: %v", err)
+	}
+	library.SetDefaultRetriever(NewBM25Retriever(docs))
 
-// ─── Shared execution path ─────────────────────────────────────────────────
-
-// runWorkflow is the single path shared by CLI and MCP modes. It builds a
-// fresh graph + engine per invocation so concurrent MCP tool calls never share
-// mutable operator state; the ants.Pool and the process-default Retriever are
-// safe to share. The question is injected via context.WithValue exactly as in
-// CLI mode.
-func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
 	g, err := buildGraph()
 	if err != nil {
-		return Result{}, fmt.Errorf("build graph: %w", err)
+		log.Fatalf("build graph: %v", err)
 	}
+
+	pool, err := ants.NewPool(10)
+	if err != nil {
+		log.Fatalf("create pool: %v", err)
+	}
+	defer pool.Release()
 
 	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
 	if err != nil {
-		return Result{}, fmt.Errorf("create engine: %w", err)
+		log.Fatalf("create engine: %v", err)
 	}
 
-	ctx = context.WithValue(ctx, questionKey{}, in.Question)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	ctx = context.WithValue(ctx, questionKey{}, *question)
 
 	if err := eng.Run(ctx); err != nil {
-		return Result{}, fmt.Errorf("run graph: %w", err)
+		log.Fatalf("run graph: %v", err)
 	}
 
-	var out Result
 	if raw, ok := eng.GetOutput("documents"); ok {
 		if p, ok := raw.(*[]library.Document); ok && p != nil {
+			fmt.Fprintln(os.Stderr, "Retrieved passages:")
 			for _, d := range *p {
-				out.Retrieved = append(out.Retrieved, Passage{Source: sourceFilename(d), Score: d.Score})
+				fmt.Fprintf(os.Stderr, "  [%s] score=%.3f\n", sourceFilename(d), d.Score)
 			}
 		}
 	}
 
+	var body string
 	if raw, ok := eng.GetOutput("body"); ok {
 		if p, ok := raw.(*string); ok && p != nil {
-			out.Answer = *p
+			body = *p
 		}
 	}
-	if out.Answer == "" {
-		return Result{}, fmt.Errorf("answer body not produced")
+	if body == "" {
+		log.Fatalf("answer body not produced")
 	}
 
 	// Citation validity is enforced by the ValidateCitationsOp vertex inside
@@ -485,10 +477,11 @@ func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, er
 	// RetrievedSourcesOp.Sources (the identifiers actually present in the
 	// retrieved documents — NOT the full loaded corpus, so a model that
 	// hallucinates the filename of a real-but-unretrieved KB document is
-	// still caught). We only read the post-validation outputs.
+	// still caught). The driver only reads the post-validation outputs.
+	var cited []string
 	if raw, ok := eng.GetOutput("accepted_sources"); ok {
 		if p, ok := raw.(*[]string); ok && p != nil {
-			out.Sources = *p
+			cited = *p
 		}
 	}
 	if raw, ok := eng.GetOutput("rejected_sources"); ok {
@@ -498,89 +491,10 @@ func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, er
 			}
 		}
 	}
-	return out, nil
-}
 
-// ─── MCP server mode ───────────────────────────────────────────────────────
-
-// runMCPServer exposes the workflow as one MCP tool over stdin/stdout. The SDK
-// infers the tool input schema from UserInput, auto-deserializes + validates
-// each request, and (because Out is non-any) emits Result as structured
-// content plus a JSON text block, so the handler returns nil for the result.
-func runMCPServer(pool *ants.Pool) {
-	server := mcp.NewServer(&mcp.Implementation{
-		Name:    "rag-bm25",
-		Version: "1.0.0",
-	}, nil)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "answer_from_kb",
-		Description: "Answer a question grounded in the local BM25-indexed knowledge base, returning the answer, validated source citations, and the retrieved passages.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
-		if strings.TrimSpace(in.Question) == "" {
-			return nil, Result{}, fmt.Errorf("question is required")
-		}
-		res, err := runWorkflow(ctx, pool, in)
-		if err != nil {
-			return nil, Result{}, err
-		}
-		return nil, res, nil
-	})
-
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		log.Fatalf("mcp server: %v", err)
-	}
-}
-
-// ─── Entrypoint ────────────────────────────────────────────────────────────
-
-func main() {
-	mcpMode := flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
-	question := flag.String("question", "", "the question to answer using the knowledge base (CLI mode)")
-	kbDir := flag.String("kb", "testdata/kb", "directory of .txt knowledge base files")
-	flag.Parse()
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
-
-	docs, err := loadKB(*kbDir)
-	if err != nil {
-		log.Fatalf("load knowledge base: %v", err)
-	}
-	library.SetDefaultRetriever(NewBM25Retriever(docs))
-
-	pool, err := ants.NewPool(10)
-	if err != nil {
-		log.Fatalf("create pool: %v", err)
-	}
-	defer pool.Release()
-
-	if *mcpMode {
-		runMCPServer(pool)
-		return
-	}
-
-	if strings.TrimSpace(*question) == "" {
-		fmt.Fprintln(os.Stderr, "usage: rag-bm25 --question \"<your question>\" [--kb <dir>] | --mcp")
-		os.Exit(2)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	res, err := runWorkflow(ctx, pool, UserInput{Question: *question})
-	if err != nil {
-		log.Fatalf("workflow: %v", err)
-	}
-
-	if len(res.Retrieved) > 0 {
-		fmt.Fprintln(os.Stderr, "Retrieved passages:")
-		for _, p := range res.Retrieved {
-			fmt.Fprintf(os.Stderr, "  [%s] score=%.3f\n", p.Source, p.Score)
-		}
-	}
-
-	fmt.Println(res.Answer)
-	if len(res.Sources) > 0 {
+	fmt.Println(body)
+	if len(cited) > 0 {
 		fmt.Println()
-		fmt.Println("Sources: " + strings.Join(res.Sources, ", "))
+		fmt.Println("Sources: " + strings.Join(cited, ", "))
 	}
 }

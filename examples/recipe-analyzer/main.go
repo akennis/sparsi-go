@@ -18,13 +18,11 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/akennis/sparsi-go/library"
 	_ "github.com/wwz16/dagor/operator/builtin" // registers CoalesceNStringOp
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
 	"github.com/wwz16/dagor"
 	"github.com/wwz16/dagor/reporter"
@@ -252,18 +250,7 @@ func buildGraph(mode sourceMode) (*graph.Graph, error) {
 
 // ─── Driver ────────────────────────────────────────────────────────────────
 
-// UserInput is the external boundary of the workflow. In CLI mode it is filled
-// from --meal; in MCP mode the SDK derives the tool input schema from this
-// struct and deserializes + validates every tools/call request into it. The
-// MCP path always queries TheMealDB live — the --fixture offline mode is a
-// CLI-only convenience resolved before the shared path.
-type UserInput struct {
-	Meal string `json:"meal" jsonschema:"the meal name to look up on TheMealDB and analyze for difficulty; required"`
-}
-
-// Result is the workflow's structured output: the MCP tool's typed Out (the
-// SDK emits it as structured content + a JSON text block) and the CLI's stdout.
-type Result struct {
+type result struct {
 	Meal            string   `json:"meal"`
 	IngredientCount int      `json:"ingredient_count"`
 	StepCount       int      `json:"step_count"`
@@ -274,64 +261,90 @@ type Result struct {
 	AINodes         []string `json:"ai_nodes"`
 }
 
-// runConfig is the resolved data source for one execution: either a live
-// TheMealDB query URL or a pre-read fixture body.
-type runConfig struct {
-	mode    sourceMode
-	body    string
-	fullURL string
-	meal    string
-}
+func main() {
+	var (
+		meal    = flag.String("meal", "", "meal name to query TheMealDB for (live API)")
+		fixture = flag.String("fixture", "", "path to a captured TheMealDB JSON response (offline)")
+	)
+	flag.Parse()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-// ─── Shared execution path ─────────────────────────────────────────────────
-
-// execute builds a fresh graph + engine for one resolved runConfig and
-// extracts the structured Result. A fresh graph per invocation keeps
-// concurrent MCP tool calls from sharing mutable operator state; the
-// ants.Pool is safe to share.
-func execute(ctx context.Context, pool *ants.Pool, cfg runConfig) (Result, error) {
-	g, err := buildGraph(cfg.mode)
-	if err != nil {
-		return Result{}, fmt.Errorf("build graph: %w", err)
+	if *meal == "" && *fixture == "" {
+		fmt.Fprintln(os.Stderr, "usage: 02-recipe-analyzer --meal <name>  |  --fixture <path>")
+		os.Exit(2)
 	}
+	if *meal != "" && *fixture != "" {
+		fmt.Fprintln(os.Stderr, "specify exactly one of --meal or --fixture")
+		os.Exit(2)
+	}
+
+	var mode sourceMode
+	var body, fullURL string
+
+	if *fixture != "" {
+		raw, err := os.ReadFile(*fixture)
+		if err != nil {
+			log.Fatalf("read fixture: %v", err)
+		}
+		mode = sourceFixture
+		body = string(raw)
+	} else {
+		mode = sourceLive
+		fullURL = "https://www.themealdb.com/api/json/v1/1/search.php?s=" + url.QueryEscape(*meal)
+	}
+
+	registerPredicates()
+
+	g, err := buildGraph(mode)
+	if err != nil {
+		log.Fatalf("build graph: %v", err)
+	}
+
+	pool, err := ants.NewPool(10)
+	if err != nil {
+		log.Fatalf("create pool: %v", err)
+	}
+	defer pool.Release()
 
 	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
 	if err != nil {
-		return Result{}, fmt.Errorf("create engine: %w", err)
+		log.Fatalf("create engine: %v", err)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 	ctx = context.WithValue(ctx, pathInstructionsKey{}, "meals.0.strInstructions")
 	ctx = context.WithValue(ctx, pathMealnameKey{}, "meals.0.strMeal")
 	ctx = context.WithValue(ctx, stepWeightKey{}, 1.0)
 	ctx = context.WithValue(ctx, cookWeightKey{}, 0.1)
-	if cfg.mode == sourceFixture {
-		ctx = context.WithValue(ctx, bodyKey{}, cfg.body)
+	if mode == sourceFixture {
+		ctx = context.WithValue(ctx, bodyKey{}, body)
 	} else {
-		ctx = context.WithValue(ctx, urlKey{}, cfg.fullURL)
+		ctx = context.WithValue(ctx, urlKey{}, fullURL)
 	}
 
 	if err := eng.Run(ctx); err != nil {
 		if errors.Is(err, library.ErrRequiredPathMissing) {
-			if cfg.mode == sourceLive {
-				return Result{}, fmt.Errorf("no results found for %q on TheMealDB", cfg.meal)
+			if mode == sourceLive {
+				log.Fatalf("no results found for %q on TheMealDB", *meal)
 			}
-			return Result{}, fmt.Errorf("fixture contains no results")
+			log.Fatalf("fixture contains no results")
 		}
-		return Result{}, fmt.Errorf("run graph: %w", err)
+		log.Fatalf("run graph: %v", err)
 	}
 
 	// Live mode: surface a non-200 HTTP status as a hard failure rather than
 	// silently feeding an error page into the AI extractors.
-	if cfg.mode == sourceLive {
+	if mode == sourceLive {
 		if statusRaw, ok := eng.GetOutput("http_status"); ok {
 			if status, ok := statusRaw.(*int); ok && status != nil && *status != 200 {
-				return Result{}, fmt.Errorf("HTTP fetch returned status %d", *status)
+				log.Fatalf("HTTP fetch returned status %d", *status)
 			}
 		}
 	}
 
 	// Pull each computed value out of the engine.
-	out := Result{}
+	out := result{}
 
 	if v, ok := getString(eng, "meal_name"); ok {
 		out.Meal = v
@@ -377,112 +390,10 @@ func execute(ctx context.Context, pool *ants.Pool, cfg runConfig) (Result, error
 			out.AINodes = append(out.AINodes, c.op)
 		}
 	}
-	return out, nil
-}
-
-// runWorkflow is the live path shared by the MCP tool and CLI live mode: it
-// builds the TheMealDB query URL for the meal, then runs the graph.
-func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
-	cfg := runConfig{
-		mode:    sourceLive,
-		meal:    in.Meal,
-		fullURL: "https://www.themealdb.com/api/json/v1/1/search.php?s=" + url.QueryEscape(in.Meal),
-	}
-	return execute(ctx, pool, cfg)
-}
-
-// ─── MCP server mode ───────────────────────────────────────────────────────
-
-// runMCPServer exposes the workflow as one MCP tool over stdin/stdout. The SDK
-// infers the tool input schema from UserInput, auto-deserializes + validates
-// each request, and (because Out is non-any) emits Result as structured
-// content plus a JSON text block, so the handler returns nil for the result.
-func runMCPServer(pool *ants.Pool) {
-	server := mcp.NewServer(&mcp.Implementation{
-		Name:    "recipe-analyzer",
-		Version: "1.0.0",
-	}, nil)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "analyze_recipe",
-		Description: "Look up a meal on TheMealDB, extract ingredients/steps/cook time, compute a difficulty score, and return difficulty-tailored cooking advice.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
-		if strings.TrimSpace(in.Meal) == "" {
-			return nil, Result{}, fmt.Errorf("meal is required")
-		}
-		res, err := runWorkflow(ctx, pool, in)
-		if err != nil {
-			return nil, Result{}, err
-		}
-		return nil, res, nil
-	})
-
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		log.Fatalf("mcp server: %v", err)
-	}
-}
-
-// ─── Entrypoint ────────────────────────────────────────────────────────────
-
-func main() {
-	var (
-		mcpMode = flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
-		meal    = flag.String("meal", "", "meal name to query TheMealDB for, live API (CLI mode)")
-		fixture = flag.String("fixture", "", "path to a captured TheMealDB JSON response, offline (CLI mode)")
-	)
-	flag.Parse()
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
-
-	registerPredicates()
-
-	pool, err := ants.NewPool(10)
-	if err != nil {
-		log.Fatalf("create pool: %v", err)
-	}
-	defer pool.Release()
-
-	if *mcpMode {
-		runMCPServer(pool)
-		return
-	}
-
-	if *meal == "" && *fixture == "" {
-		fmt.Fprintln(os.Stderr, "usage: 02-recipe-analyzer --meal <name>  |  --fixture <path>  |  --mcp")
-		os.Exit(2)
-	}
-	if *meal != "" && *fixture != "" {
-		fmt.Fprintln(os.Stderr, "specify exactly one of --meal or --fixture")
-		os.Exit(2)
-	}
-
-	// CLI keeps the offline convenience: resolve the data source here
-	// (live meal or --fixture) and feed the shared execution path.
-	var cfg runConfig
-	if *fixture != "" {
-		raw, err := os.ReadFile(*fixture)
-		if err != nil {
-			log.Fatalf("read fixture: %v", err)
-		}
-		cfg = runConfig{mode: sourceFixture, body: string(raw)}
-	} else {
-		cfg = runConfig{
-			mode:    sourceLive,
-			meal:    *meal,
-			fullURL: "https://www.themealdb.com/api/json/v1/1/search.php?s=" + url.QueryEscape(*meal),
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	res, err := execute(ctx, pool, cfg)
-	if err != nil {
-		log.Fatalf("workflow: %v", err)
-	}
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(res); err != nil {
+	if err := enc.Encode(out); err != nil {
 		log.Fatalf("encode output: %v", err)
 	}
 }
