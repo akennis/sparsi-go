@@ -90,10 +90,10 @@ graph.NewBuilder("my_graph").
     ...
 ```
 
-The import for `ContextValFactory` is `"github.com/wwz16/dagor/operator/builtin"`.
-This is the same blank import already required for coalesce ops — `_ "github.com/wwz16/dagor/operator/builtin"` —
+The import for `ContextValFactory` is `"github.com/akennis/dagor/operator/builtin"`.
+This is the same blank import already required for coalesce ops — `_ "github.com/akennis/dagor/operator/builtin"` —
 but to call `builtin.ContextValFactory` you need it named, not blank:
-`builtin "github.com/wwz16/dagor/operator/builtin"`.
+`builtin "github.com/akennis/dagor/operator/builtin"`.
 
 ---
 
@@ -273,14 +273,14 @@ Only import what you use. Do not invent import paths.
 
 ```go
 "github.com/panjf2000/ants/v2"               // goroutine pool — required by NewEngine
-"github.com/wwz16/dagor"                     // dagor.NewEngine, dagor.WithReporter, dagor.RunID
-"github.com/wwz16/dagor/config"              // config.MergeCoalesce
-"github.com/wwz16/dagor/graph"               // graph.NewBuilder
-"github.com/wwz16/dagor/operator"            // operator.RegisterOp, operator.RegisterOpFactory
-"github.com/wwz16/dagor/operator/builtin"    // Coalesce*Op + ContextValFactory
+"github.com/akennis/dagor"                     // dagor.NewEngine, dagor.WithReporter, dagor.RunID
+"github.com/akennis/dagor/config"              // config.MergeCoalesce
+"github.com/akennis/dagor/graph"               // graph.NewBuilder
+"github.com/akennis/dagor/operator"            // operator.RegisterOp, operator.RegisterOpFactory
+"github.com/akennis/dagor/operator/builtin"    // Coalesce*Op + ContextValFactory
                                              // use blank _ when not calling builtin.* directly
-"github.com/wwz16/dagor/predicate"           // predicate.Register
-"github.com/wwz16/dagor/reporter"            // reporter.New
+"github.com/akennis/dagor/predicate"           // predicate.Register
+"github.com/akennis/dagor/reporter"            // reporter.New
 ```
 
 ---
@@ -360,7 +360,7 @@ if ok {
 
 ---
 
-## COALESCE OPS — registered by `_ "github.com/wwz16/dagor/operator/builtin"`
+## COALESCE OPS — registered by `_ "github.com/akennis/dagor/operator/builtin"`
 
 2-input (`A`, `B` → `Result`) — first non-nil pointer wins:
 - `CoalesceStringOp`, `CoalesceIntOp`, `CoalesceFloat64Op`, `CoalesceBoolOp`

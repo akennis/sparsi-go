@@ -88,6 +88,6 @@ sparsi-go/
 
 ## Dependencies
 
-- [`dagor`](https://github.com/wwz16/dagor) — DAG execution engine (replace-directive-pinned to `github.com/akennis/dagor`)
+- [`dagor`](https://github.com/akennis/dagor) — DAG execution engine (v0.1.0)
 - [`anthropic-sdk-go`](https://github.com/anthropics/anthropic-sdk-go) — Claude API client
 - [`ants/v2`](https://github.com/panjf2000/ants) — goroutine worker pool used by examples

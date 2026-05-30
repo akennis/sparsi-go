@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/wwz16/dagor/config"
-	"github.com/wwz16/dagor/operator"
+	"github.com/akennis/dagor/config"
+	"github.com/akennis/dagor/operator"
 )
 
 const Float64ToStringOpDescription = "Float64ToStringOp: formats a float64 as string using %v. Input: Value *float64. Output: Result string."

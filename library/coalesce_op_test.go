@@ -3,9 +3,9 @@ package library
 import (
 	"testing"
 
-	"github.com/wwz16/dagor/config"
-	"github.com/wwz16/dagor/graph"
-	"github.com/wwz16/dagor/predicate"
+	"github.com/akennis/dagor/config"
+	"github.com/akennis/dagor/graph"
+	"github.com/akennis/dagor/predicate"
 )
 
 func boolPtr(v bool) *bool { return &v }

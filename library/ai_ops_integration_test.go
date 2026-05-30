@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wwz16/dagor/config"
+	"github.com/akennis/dagor/config"
 )
 
 // skipIfNoAPIKey skips a test unless the caller has explicitly opted into the

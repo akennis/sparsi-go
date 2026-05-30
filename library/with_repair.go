@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"reflect"
 
-	"github.com/wwz16/dagor"
-	"github.com/wwz16/dagor/config"
-	"github.com/wwz16/dagor/operator"
+	"github.com/akennis/dagor"
+	"github.com/akennis/dagor/config"
+	"github.com/akennis/dagor/operator"
 )
 
 const WithRepairDescription = `WithRepair: AI-driven recovery wrapper around a deterministic op.

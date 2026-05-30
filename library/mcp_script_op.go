@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wwz16/dagor"
-	"github.com/wwz16/dagor/config"
+	"github.com/akennis/dagor"
+	"github.com/akennis/dagor/config"
 )
 
 // MCPSession is the per-call interface handed to an MCPScriptOp's Script

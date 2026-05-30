@@ -37,10 +37,8 @@ Read the following references before writing any code:
    ```
 5. Run the following commands in `<output_dir>` to resolve dependencies:
    - `go get github.com/akennis/sparsi-go@main`
-   - `go mod edit -replace github.com/wwz16/dagor=github.com/akennis/dagor@latest`
-   - `go get github.com/wwz16/dagor`
    - `go mod tidy`
-   This ensures the `main` branch of `sparsi-go` is used and the `dagor` dependency is correctly routed.
+   This ensures the `main` branch of `sparsi-go` is used and all dependencies are resolved.
 6. Run `go build ./...` in `<output_dir>` to compile.
 7. If the build fails, read the error output, fix `main.go`, and re-run step 6.
 8. Repeat until the build exits 0.
@@ -1082,13 +1080,13 @@ _ "github.com/akennis/sparsi-go/library"     // library ops — always include (
 
 // dagor ecosystem (see references/dagor-api.md for per-package details)
 "github.com/panjf2000/ants/v2"               // goroutine pool
-"github.com/wwz16/dagor"                     // NewEngine, WithReporter, RunID
-"github.com/wwz16/dagor/config"              // config.MergeCoalesce
-"github.com/wwz16/dagor/graph"               // graph.NewBuilder
-"github.com/wwz16/dagor/operator"            // RegisterOp, RegisterOpFactory
-"github.com/wwz16/dagor/operator/builtin"    // Coalesce*Op + ContextValFactory
-"github.com/wwz16/dagor/predicate"           // predicate.Register (only when using conditions)
-"github.com/wwz16/dagor/reporter"            // reporter.New
+"github.com/akennis/dagor"                     // NewEngine, WithReporter, RunID
+"github.com/akennis/dagor/config"              // config.MergeCoalesce
+"github.com/akennis/dagor/graph"               // graph.NewBuilder
+"github.com/akennis/dagor/operator"            // RegisterOp, RegisterOpFactory
+"github.com/akennis/dagor/operator/builtin"    // Coalesce*Op + ContextValFactory
+"github.com/akennis/dagor/predicate"           // predicate.Register (only when using conditions)
+"github.com/akennis/dagor/reporter"            // reporter.New
 ```
 
 # Prohibited patterns
@@ -1110,7 +1108,7 @@ from `eng.GetOutput("final_result")`.
 ## MERGE constant
 ```
 // WRONG: .Merge(1)                    // untyped int — compile error
-// RIGHT: .Merge(config.MergeCoalesce) // import "github.com/wwz16/dagor/config"
+// RIGHT: .Merge(config.MergeCoalesce) // import "github.com/akennis/dagor/config"
 ```
 
 ## eng.SetInput anti-pattern

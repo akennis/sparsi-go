@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/wwz16/dagor/config"
+	"github.com/akennis/dagor/config"
 	"google.golang.org/genai"
 )
 

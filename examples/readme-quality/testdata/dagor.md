@@ -29,7 +29,7 @@ Relationship between **Graph**、**Vertex** and **Operator**:
 ## 📦 Installation
 
 ```bash
-go get github.com/wwz16/dagor
+go get github.com/akennis/dagor
 ```
 
 ## 🚀 Quick Start
@@ -46,8 +46,8 @@ import (
     "fmt"
     "log"
 
-    "github.com/wwz16/dagor/config"
-    "github.com/wwz16/dagor/operator"
+    "github.com/akennis/dagor/config"
+    "github.com/akennis/dagor/operator"
 )
 
 type AddOp struct {
@@ -157,7 +157,7 @@ import (
     "log"
     "fmt"
 
-    "github.com/wwz16/dagor"
+    "github.com/akennis/dagor"
     "github.com/panjf2000/ants/v2"
 )
 

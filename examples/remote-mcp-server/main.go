@@ -32,11 +32,11 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
-	"github.com/wwz16/dagor"
-	"github.com/wwz16/dagor/graph"
-	"github.com/wwz16/dagor/operator"
-	builtin "github.com/wwz16/dagor/operator/builtin"
-	"github.com/wwz16/dagor/reporter"
+	"github.com/akennis/dagor"
+	"github.com/akennis/dagor/graph"
+	"github.com/akennis/dagor/operator"
+	builtin "github.com/akennis/dagor/operator/builtin"
+	"github.com/akennis/dagor/reporter"
 )
 
 // SearchInput is the typed argument shape passed to the

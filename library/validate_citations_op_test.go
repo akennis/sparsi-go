@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/wwz16/dagor/config"
+	"github.com/akennis/dagor/config"
 )
 
 // runOp drives the standard Setup/Reset/Run lifecycle for an op under test.
