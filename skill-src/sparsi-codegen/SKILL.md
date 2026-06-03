@@ -26,9 +26,10 @@ Read the following references before writing any code:
 1. Read all three references as listed above.
 2. **Strict Adherence:** Implement the approved design EXACTLY.
    - Do NOT improvise, omit, or add vertices.
-   - Use the EXACT `provider` and `model` specified in the design for each AI operation.
    - Use the EXACT `operation` text and `predicate` strings from the design.
-   - If the design specifies `gemini-3-flash-preview`, do NOT use `gemini-1.5-flash` or any other version.3. Create `<output_dir>/` and write the complete Go source to `<output_dir>/main.go`.
+   - Use the EXACT `provider` and `model` specified in the design for each AI operation. Do NOT substitute them with different versions (e.g., do NOT use `gemini-1.5-flash` if the design specifies a newer version like `gemini-3-flash-preview` or `gemini-3.5-flash`).
+
+3. Create `<output_dir>/` and write the complete Go source to `<output_dir>/main.go`.
 4. Write `<output_dir>/go.mod` with this content (substitute the actual Go version):
    ```
    module solution
