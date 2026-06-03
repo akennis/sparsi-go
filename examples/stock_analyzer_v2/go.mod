@@ -1,11 +1,12 @@
 module solution
 
-go 1.26.2
+go 1.26
 
 require (
-	github.com/akennis/sparsi-go v0.0.0-20260516111249-4c10d4bf890e
+	github.com/akennis/dagor v0.1.0
+	github.com/akennis/sparsi-go v0.1.1-0.20260530160131-9ba649097916
+	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/panjf2000/ants/v2 v2.12.0
-	github.com/wwz16/dagor v0.0.0
 )
 
 require (
@@ -19,7 +20,6 @@ require (
 	github.com/google/s2a-go v0.1.8 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/modelcontextprotocol/go-sdk v1.6.0 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
@@ -39,5 +39,3 @@ require (
 	google.golang.org/grpc v1.66.2 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 )
-
-replace github.com/wwz16/dagor => github.com/akennis/dagor v0.0.0
