@@ -123,7 +123,7 @@ func buildGraph() (*graph.Graph, error) {
 		Params(map[string]string{
 			"predicate": "does every factual claim in the summary appear in or follow directly from the source document, with no information added or invented?",
 			"provider":  "gemini",
-			"model":     "gemini-3-flash-preview",
+			"model":     "gemini-3.5-flash",
 		}).
 		Input("Input", "query").
 		Output("Result", "faithful").

@@ -145,17 +145,17 @@ func buildGraph(mode sourceMode) (*graph.Graph, error) {
 
 		// Stage 3 — three parallel AI extractors over the instructions text.
 		Vertex("ingredients").Op("AIExtractStringSliceOp").
-		Params(map[string]string{"operation": "extract every distinct ingredient name from this recipe as a flat list (one ingredient per item; no quantities or units)", "provider": "gemini", "model": "gemini-3-flash-preview"}).
+		Params(map[string]string{"operation": "extract every distinct ingredient name from this recipe as a flat list (one ingredient per item; no quantities or units)", "provider": "gemini", "model": "gemini-3.5-flash"}).
 		Input("Input", "instructions_text").
 		Output("Result", "ingredients").
 
 		Vertex("steps").Op("AIExtractStringSliceOp").
-		Params(map[string]string{"operation": "extract every discrete step required to prepare and cook the meal as a flat list (one step per item); exclude optional storage (like freezing) and serving suggestions", "provider": "gemini", "model": "gemini-3-flash-preview"}).
+		Params(map[string]string{"operation": "extract every discrete step required to prepare and cook the meal as a flat list (one step per item); exclude optional storage (like freezing) and serving suggestions", "provider": "gemini", "model": "gemini-3.5-flash"}).
 		Input("Input", "instructions_text").
 		Output("Result", "steps").
 
 		Vertex("cook_minutes").Op("AIParseNumberOp").
-		Params(map[string]string{"operation": "estimate total active and passive cooking time in minutes; if a step is optional or provides a time range, use the minimum time; respond with a single integer", "provider": "gemini", "model": "gemini-3-flash-preview"}).
+		Params(map[string]string{"operation": "estimate total active and passive cooking time in minutes; if a step is optional or provides a time range, use the minimum time; respond with a single integer", "provider": "gemini", "model": "gemini-3.5-flash"}).
 		Input("Input", "instructions_text").
 		Output("Result", "cook_minutes").
 
@@ -233,7 +233,7 @@ func buildGraph(mode sourceMode) (*graph.Graph, error) {
 			Vertex(lane.name+"_advice").Op("AIComputeStringToStringOp").
 			Condition(lane.condition).
 			ConditionInput("difficulty_score").
-			Params(map[string]string{"operation": lane.operation, "provider": "gemini", "model": "gemini-3-flash-preview"}).
+			Params(map[string]string{"operation": lane.operation, "provider": "gemini", "model": "gemini-3.5-flash"}).
 			Input("Input", "meal_name").
 			Output("Result", lane.name+"_advice")
 	}

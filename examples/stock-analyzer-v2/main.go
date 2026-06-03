@@ -312,7 +312,7 @@ func buildGraph(avAPIKey, fredAPIKey, newsAPIKey string) (*graph.Graph, error) {
 		Vertex("context_builder").Op("FormatStockContextOp").Input("Ticker", "ticker_wire").Input("AVData", "av_wire").Input("MacroData", "macro_wire").Input("NewsData", "news_wire").Output("Context", "context_wire").
 		Vertex("analyze").Op("AnalyzeOp").Params(map[string]string{
 		"operation": "Analyze stock. Return recommendation and rationale.",
-		"provider":  "gemini", "model": "gemini-3-flash-preview",
+		"provider":  "gemini", "model": "gemini-3.5-flash",
 	}).Input("Input", "context_wire").Output("Result", "final_result").Build()
 }
 
