@@ -37,13 +37,9 @@ Read the following references before writing any code:
    ```
 5. Run the following commands in `<output_dir>` to resolve dependencies:
    - `go get github.com/akennis/sparsi-go@main`
-   - `go mod edit -replace github.com/wwz16/dagor=github.com/akennis/dagor@latest`
-   - `go get github.com/wwz16/dagor`
    - `go mod tidy`
-   This ensures the `main` branch of `sparsi-go` is used and the `dagor` dependency is correctly routed.
-6. **Build Solution:** Run the following commands in `<output_dir>` to compile. Use a fixed output name to ensure only one executable exists.
-   - **Cleanup:** Delete any existing `solution` and `solution.exe` files in the directory to start fresh.
-   - **Build:** `go build -o solution.exe ./...` (on Windows) or `go build -o solution ./...` (on Unix).
+   This ensures the `main` branch of `sparsi-go` is used and all dependencies are resolved.
+6. Run `go build ./...` in `<output_dir>` to compile.
 7. If the build fails, read the error output, fix `main.go`, and re-run step 6.
 8. Repeat until the build exits 0.
 9. **Runtime Validation:** You MUST verify the behavioral correctness of the generated program before finishing. Run the compiled executable (`.\solution.exe` on Windows, `./solution` on Unix) with representative sample inputs (based on the original task description) **and the `-v` flag enabled to ensure all debug logging is visible in the verification output.**
@@ -148,26 +144,188 @@ ctx = context.WithValue(ctx, queryKey, userText)
 ALL `os.Getenv` calls MUST use literal string names in `main()`.
 Never call `os.Getenv` inside an operator's `Setup` or `Run`.
 
-## CLI flag parsing
-Parse all user inputs from CLI flags in `main()` using the `flag` package. Validate required flags
-before building the graph. Generated programs are plain CLI tools — no server modes or HTTP handlers.
+## Dual-mode entrypoint (CLI + `-mcp` stdio MCP server)
+
+Every generated program is dual-mode. Default behavior is a one-shot CLI tool.
+When invoked with `-mcp`, the **same binary** runs as a local MCP server that
+speaks newline-delimited JSON over stdin/stdout and exposes the workflow as a
+single MCP tool. The two modes share one execution path; only the input source
+differs (CLI flags vs. a deserialized MCP `tools/call` request).
+
+> **Not to be confused with MCP *client* ops.** `MCPCallOp` / `MCPScriptOp`
+> and the `local-mcp-server` / `remote-mcp-server` examples make the workflow a
+> *client* of some other MCP server. The `-mcp` mode here makes the generated
+> program itself an MCP *server*. They are orthogonal — a workflow can use
+> `MCPCallOp` internally and still be served via `-mcp`.
+
+### Required structure
+
+Emit exactly these four pieces. Do not invent server/HTTP modes beyond `-mcp`.
+
+**1. `UserInput` — one struct, one field per external workflow input.** The
+`json` tag is the MCP argument name; the `jsonschema` tag becomes that field's
+description in the auto-derived tool input schema. The MCP SDK derives the
+tool's input schema from this struct and unmarshals + validates every request
+into it automatically — you never hand-parse MCP JSON. Mark optional fields
+with `,omitempty`; state required-ness in the `jsonschema` text. The exact
+field set comes from the design's `### MCP Interface` block.
+
+```go
+type UserInput struct {
+    City    string `json:"city" jsonschema:"city name to fetch weather for; required unless fixture is set"`
+    Fixture string `json:"fixture,omitempty" jsonschema:"optional path to a captured JSON fixture instead of a live fetch"`
+}
+
+// Result is the workflow's structured output: the MCP tool's typed Out (the
+// SDK emits it as structured content + a JSON text block) and the CLI's stdout.
+type Result struct {
+    Advice string `json:"advice"`
+    Band   string `json:"band"`
+}
+```
+
+**2. `runWorkflow` — the single shared execution path.** Builds a FRESH graph
++ engine per invocation so concurrent MCP tool calls never share mutable
+operator state (the `ants.Pool` is safe to share). Every `UserInput` field is
+injected via `context.WithValue` exactly as before — **`eng.SetInput` remains
+prohibited in both modes**; the MCP request is just another source for the
+values a `ContextValOp` reads.
+
+```go
+type ctxKey string
+
+const (
+    cityKey    ctxKey = "city"
+    fixtureKey ctxKey = "fixture"
+)
+
+func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
+    g, err := buildGraph()
+    if err != nil {
+        return Result{}, fmt.Errorf("build graph: %w", err)
+    }
+    eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
+    if err != nil {
+        return Result{}, fmt.Errorf("create engine: %w", err)
+    }
+
+    // Inject EVERY request/flag value (NOT eng.SetInput). Constants still use
+    // RegisterConst or their own context.WithValue calls, exactly as before.
+    ctx = context.WithValue(ctx, cityKey, in.City)
+    ctx = context.WithValue(ctx, fixtureKey, in.Fixture)
+
+    if err := eng.Run(ctx); err != nil {
+        return Result{}, fmt.Errorf("run graph: %w", err)
+    }
+
+    var out Result
+    if v, ok := eng.GetOutput("final_advice"); ok {
+        if p, ok := v.(*string); ok && p != nil {
+            out.Advice = *p
+        }
+    }
+    if v, ok := eng.GetOutput("band"); ok {
+        if p, ok := v.(*string); ok && p != nil {
+            out.Band = *p
+        }
+    }
+    return out, nil
+}
+```
+
+**3. `main` — flag parse + mode dispatch.** `-mcp` is a plain bool flag
+(`-mcp` and `--mcp` are equivalent under Go's `flag`). CLI flags are still
+parsed with the `flag` package and validated before running.
+
+```go
+func main() {
+    mcpMode := flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
+    city := flag.String("city", "", "city name (CLI mode)")
+    fixture := flag.String("fixture", "", "fixture path (CLI mode)")
+    flag.Parse()
+    slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+    pool, err := ants.NewPool(10)
+    if err != nil {
+        log.Fatalf("create pool: %v", err)
+    }
+    defer pool.Release()
+    // If any stdio MCP *client* vertex sets pool_size>0, also add here:
+    //   defer library.ShutdownMCPPool(context.Background())
+
+    if *mcpMode {
+        runMCPServer(pool)
+        return
+    }
+
+    in := UserInput{City: *city, Fixture: *fixture}
+    if in.City == "" && in.Fixture == "" {
+        log.Fatal("one of --city or --fixture is required")
+    }
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+    defer cancel()
+    res, err := runWorkflow(ctx, pool, in)
+    if err != nil {
+        log.Fatalf("workflow: %v", err)
+    }
+    enc := json.NewEncoder(os.Stdout)
+    enc.SetIndent("", "  ")
+    if err := enc.Encode(res); err != nil {
+        log.Fatalf("encode output: %v", err)
+    }
+}
+```
+
+**4. `runMCPServer` — expose the workflow as one MCP tool over stdio.** Uses
+the already-vendored official SDK (`github.com/modelcontextprotocol/go-sdk/mcp`
+— the same module the MCP client ops use; no new dependency). `mcp.AddTool`
+infers the tool input schema from `UserInput`, auto-deserializes and validates
+each `tools/call` request into it, and (because `Out` is non-`any`) emits the
+returned `Result` as structured content plus a JSON text block — so the handler
+returns `nil` for `*mcp.CallToolResult`.
 
 Always include a `-v` (verbose) flag to toggle between `slog.LevelInfo` and `slog.LevelDebug`.
 
 ```go
-input := flag.String("input", "", "input text to process")
-verbose := flag.Bool("v", false, "enable verbose (debug) logging")
-flag.Parse()
-if *input == "" { log.Fatal("--input is required") }
+func runMCPServer(pool *ants.Pool) {
+    server := mcp.NewServer(&mcp.Implementation{
+        Name:    "weather-advisor", // workflow short name from the design
+        Version: "1.0.0",
+    }, nil)
 
-level := slog.LevelInfo
-if *verbose {
-    level = slog.LevelDebug
+    mcp.AddTool(server, &mcp.Tool{
+        Name:        "run_weather_advisor", // tool name from the design's MCP Interface block
+        Description: "Given a city (or fixture path), returns outfit advice and the temperature band.",
+    }, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
+        // `in` is already deserialized + schema-validated from the request.
+        if in.City == "" && in.Fixture == "" {
+            return nil, Result{}, fmt.Errorf("one of city or fixture is required")
+        }
+        res, err := runWorkflow(ctx, pool, in)
+        if err != nil {
+            return nil, Result{}, err // surfaced to the client as an error result
+        }
+        return nil, res, nil
+    })
+
+    // StdioTransport: newline-delimited JSON over this process's stdin/stdout.
+    // server.Run blocks until the client disconnects or ctx is cancelled.
+    if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+        log.Fatalf("mcp server: %v", err)
+    }
 }
-slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
-
-// then: context.WithValue, buildGraph, eng.Run
 ```
+
+Notes:
+- Build the graph + engine **inside `runWorkflow`** (per call), never once in
+  `main`, so repeated MCP tool calls each get clean operator state.
+- Keep `buildGraph()` parameterless where possible; if the design needs a
+  build-time mode switch (e.g. live vs. fixture), pass it through `UserInput`
+  and branch inside `runWorkflow`, not via a second graph built in `main`.
+- The MCP handler must not call `os.Exit`/`log.Fatal`; return an `error` so the
+  server reports it to the client and stays alive for the next call.
+- All `os.Getenv` calls still live in `main()` only (e.g. `CLAUDE_API_KEY` is
+  read by library ops internally; do not read it in the handler).
 
 ## MCP transport selection
 MCP vertices accept a `transport` param of either `"stdio"` (default) or `"http"`. Stdio
@@ -909,7 +1067,12 @@ file deletes).
 "log/slog"    // structured logging
 "os"          // os.Stderr for slog handler
 "context"     // context.WithValue, context.WithTimeout
-"flag"        // CLI flag parsing
+"flag"        // CLI flag parsing + the -mcp bool flag
+"encoding/json" // CLI-mode stdout encoding
+
+// MCP server (the -mcp dual-mode entrypoint) — already a direct dependency,
+// the same module the MCP client ops use; no go.mod change needed.
+"github.com/modelcontextprotocol/go-sdk/mcp"  // NewServer, AddTool, StdioTransport
 
 // sparsi-go library
 _ "github.com/akennis/sparsi-go/library"     // library ops — always include (triggers init)
@@ -918,13 +1081,13 @@ _ "github.com/akennis/sparsi-go/library"     // library ops — always include (
 
 // dagor ecosystem (see references/dagor-api.md for per-package details)
 "github.com/panjf2000/ants/v2"               // goroutine pool
-"github.com/wwz16/dagor"                     // NewEngine, WithReporter, RunID
-"github.com/wwz16/dagor/config"              // config.MergeCoalesce
-"github.com/wwz16/dagor/graph"               // graph.NewBuilder
-"github.com/wwz16/dagor/operator"            // RegisterOp, RegisterOpFactory
-"github.com/wwz16/dagor/operator/builtin"    // Coalesce*Op + ContextValFactory
-"github.com/wwz16/dagor/predicate"           // predicate.Register (only when using conditions)
-"github.com/wwz16/dagor/reporter"            // reporter.New
+"github.com/akennis/dagor"                     // NewEngine, WithReporter, RunID
+"github.com/akennis/dagor/config"              // config.MergeCoalesce
+"github.com/akennis/dagor/graph"               // graph.NewBuilder
+"github.com/akennis/dagor/operator"            // RegisterOp, RegisterOpFactory
+"github.com/akennis/dagor/operator/builtin"    // Coalesce*Op + ContextValFactory
+"github.com/akennis/dagor/predicate"           // predicate.Register (only when using conditions)
+"github.com/akennis/dagor/reporter"            // reporter.New
 ```
 
 # Prohibited patterns
@@ -946,7 +1109,7 @@ from `eng.GetOutput("final_result")`.
 ## MERGE constant
 ```
 // WRONG: .Merge(1)                    // untyped int — compile error
-// RIGHT: .Merge(config.MergeCoalesce) // import "github.com/wwz16/dagor/config"
+// RIGHT: .Merge(config.MergeCoalesce) // import "github.com/akennis/dagor/config"
 ```
 
 ## eng.SetInput anti-pattern

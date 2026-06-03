@@ -3,14 +3,12 @@ module github.com/akennis/sparsi-go
 go 1.25.5
 
 require (
+	github.com/akennis/dagor v0.1.0
 	github.com/anthropics/anthropic-sdk-go v1.37.0
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/panjf2000/ants/v2 v2.12.0
-	github.com/wwz16/dagor v0.0.0
 	google.golang.org/genai v1.55.0
 )
-
-replace github.com/wwz16/dagor => github.com/akennis/dagor v0.0.0
 
 require (
 	cloud.google.com/go v0.116.0 // indirect

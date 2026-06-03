@@ -29,6 +29,7 @@ var exampleDirs = []string{
 	"ticket-triager",
 	"recipe-analyzer",
 	"readme-quality",
+	"stock-analyzer",
 	"weather-advisor",
 	"hn-topic-brief",
 	"faithful-summary",

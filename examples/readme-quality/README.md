@@ -14,7 +14,7 @@ warning when no tests or CI are mentioned.
 
 ### Live slug (main branch)
 ```
-go run ./examples/03-readme-quality/ --slug wwz16/dagor
+go run ./examples/03-readme-quality/ --slug akennis/dagor
 ```
 
 ### Live slug (master branch fallback)
@@ -31,7 +31,7 @@ go run ./examples/03-readme-quality/ --fixture examples/03-readme-quality/testda
 
 ```json
 {
-  "slug": "wwz16/dagor",
+  "slug": "akennis/dagor",
   "purpose": "...",
   "doc_score": 0.72,
   "clarity_score": 0.62,

@@ -1,13 +1,18 @@
 // Package main is a customer-support ticket triager.
 //
-// It reads a free-text ticket from a file, classifies it via ModeSelectOp into
+// It reads a free-text ticket — from a file (--ticket) or inline on the CLI
+// (--ticket-text), or from the `ticket` field of an MCP request — classifies
+// it via ModeSelectOp into
 // one of {billing, bug, feature, other}, and routes the ticket through a
-// category-specific extraction lane.  The four lanes run in parallel as DAG
-// branches; only the lane whose predicate matches actually fires, and its
-// per-lane JSON summary coalesces into a single final brief.
+// category-specific extraction lane.  The billing, bug, and feature lanes run
+// in parallel as DAG branches; only the lane whose predicate matches actually
+// fires, and its per-lane JSON summary coalesces into a single final brief.
+// Tickets that classify as "other" are intentionally unsupported: the "other"
+// lane fails the run with an error instead of producing a brief, so the CLI
+// exits non-zero and the MCP tool returns an error result.
 //
 // AIClientFactory demo. Every AI vertex carries a `credential_ref` param
-// naming a "cost center" (triage, billing, bug, feature, other). A custom
+// naming a "cost center" (triage, billing, bug, feature). A custom
 // library.AIClientFactory — costCenterFactory below — maps that ref onto an
 // env var (CLAUDE_API_KEY_<COSTCENTER>) so each team can be billed on its
 // own Anthropic API key. When a per-cost-center key is unset, the factory
@@ -24,6 +29,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -38,16 +44,17 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/akennis/sparsi-go/library"      // registers library ops
-	_ "github.com/wwz16/dagor/operator/builtin" // registers CoalesceNStringOp
+	_ "github.com/akennis/dagor/operator/builtin" // registers CoalesceNStringOp
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/panjf2000/ants/v2"
-	"github.com/wwz16/dagor"
-	"github.com/wwz16/dagor/reporter"
-	"github.com/wwz16/dagor/config"
-	"github.com/wwz16/dagor/graph"
-	"github.com/wwz16/dagor/operator"
-	builtin "github.com/wwz16/dagor/operator/builtin"
-	"github.com/wwz16/dagor/predicate"
+	"github.com/akennis/dagor"
+	"github.com/akennis/dagor/reporter"
+	"github.com/akennis/dagor/config"
+	"github.com/akennis/dagor/graph"
+	"github.com/akennis/dagor/operator"
+	builtin "github.com/akennis/dagor/operator/builtin"
+	"github.com/akennis/dagor/predicate"
 )
 
 // ─── Context keys ──────────────────────────────────────────────────────────
@@ -277,51 +284,37 @@ func (op *EncodeFeatureOp) ResetFields() {
 	op.Result = ""
 }
 
-// EncodeOtherOp wraps the polite acknowledgement in the lane JSON envelope.
-type EncodeOtherOp struct {
-	Acknowledgement *string
-	Result          string
+// errOtherUnsupported is returned by RejectOtherOp when a ticket classifies as
+// "other".  The "other" lane intentionally fails the run instead of producing a
+// brief; runWorkflow wraps this with %w, so callers can errors.Is against it to
+// surface a clean rejection (the MCP handler does this).
+var errOtherUnsupported = errors.New(`ticket classified as "other": unsupported category — the triager only handles billing, bug, and feature tickets`)
+
+// RejectOtherOp fails the run when the "other" lane fires.  It sits downstream
+// of gate_other, so skip-propagation prunes it for every supported category;
+// when a ticket actually classifies as "other" the gate fires, this op runs,
+// and returning errOtherUnsupported aborts the whole graph.
+type RejectOtherOp struct {
+	Body *string
 }
 
-func (op *EncodeOtherOp) Setup(_ *config.Params) error { return nil }
-func (op *EncodeOtherOp) Reset() error                 { return nil }
-func (op *EncodeOtherOp) Run(_ context.Context) error {
-	details := map[string]any{}
-	if op.Acknowledgement != nil {
-		details["acknowledgement"] = *op.Acknowledgement
-	}
-	out := map[string]any{
-		"category": "other",
-		"details":  details,
-	}
-	b, err := json.Marshal(out)
-	if err != nil {
-		return fmt.Errorf("EncodeOtherOp: %w", err)
-	}
-	op.Result = string(b)
-	return nil
-}
-func (op *EncodeOtherOp) InputFields() map[string]any {
-	return map[string]any{"Acknowledgement": &op.Acknowledgement}
-}
-func (op *EncodeOtherOp) OutputFields() map[string]any {
-	return map[string]any{"Result": &op.Result}
-}
-func (op *EncodeOtherOp) SetInputField(field string, value any) error {
-	if field != "Acknowledgement" {
-		return fmt.Errorf("EncodeOtherOp: unknown field %q", field)
+func (op *RejectOtherOp) Setup(_ *config.Params) error { return nil }
+func (op *RejectOtherOp) Reset() error                 { return nil }
+func (op *RejectOtherOp) Run(_ context.Context) error  { return errOtherUnsupported }
+func (op *RejectOtherOp) InputFields() map[string]any  { return map[string]any{"Body": &op.Body} }
+func (op *RejectOtherOp) OutputFields() map[string]any { return map[string]any{} }
+func (op *RejectOtherOp) SetInputField(field string, value any) error {
+	if field != "Body" {
+		return fmt.Errorf("RejectOtherOp: unknown field %q", field)
 	}
 	v, ok := value.(*string)
 	if !ok {
-		return fmt.Errorf("EncodeOtherOp: Acknowledgement: expected *string, got %T", value)
+		return fmt.Errorf("RejectOtherOp: Body: expected *string, got %T", value)
 	}
-	op.Acknowledgement = v
+	op.Body = v
 	return nil
 }
-func (op *EncodeOtherOp) ResetFields() {
-	op.Acknowledgement = nil
-	op.Result = ""
-}
+func (op *RejectOtherOp) ResetFields() { op.Body = nil }
 
 // ─── AIClientFactory: per-cost-center billing ──────────────────────────────
 
@@ -394,7 +387,7 @@ func init() {
 		operator.RegisterOp[EncodeBillingOp],
 		operator.RegisterOp[EncodeBugOp],
 		operator.RegisterOp[EncodeFeatureOp],
-		operator.RegisterOp[EncodeOtherOp],
+		operator.RegisterOp[RejectOtherOp],
 	} {
 		if err := reg(); err != nil {
 			log.Fatalf("register custom op: %v", err)
@@ -529,104 +522,87 @@ func buildGraph() (*graph.Graph, error) {
 		Input("BusinessImpact", "feature_business_impact").
 		Output("Result", "feature_json").
 
-		// ── Other lane ──────────────────────────────────────────────────
+		// ── Other lane: unsupported → fail the run ───────────────────────
+		// Gated on lane_is_other.  When a ticket classifies as "other" the
+		// gate fires and RejectOtherOp errors out, aborting the whole run;
+		// for every supported category the gate is skipped and
+		// skip-propagation prunes RejectOtherOp so it never fires.
 		Vertex("gate_other").Op("LaneGateOp").
 		Condition("lane_is_other").
 		ConditionInput("ticket_category").
 		Input("Body", "ticket_body").
 		Output("BodyOut", "other_body").
 
-		Vertex("other_ack").Op("AIComputeStringToStringOp").
-		Params(map[string]string{
-			"operation":      "write a polite, brief one-paragraph acknowledgement of this customer email",
-			"credential_ref": "other",
-		}).
-		Input("Input", "other_body").
-		Output("Result", "other_acknowledgement").
-
-		Vertex("other_encode").Op("EncodeOtherOp").
-		Input("Acknowledgement", "other_acknowledgement").
-		Output("Result", "other_json").
+		Vertex("other_reject").Op("RejectOtherOp").
+		Input("Body", "other_body").
 
 		// ── Coalesce: the one lane that ran wins ────────────────────────
-		// CoalesceNStringOp is the N-input variant (the 4-input library variant
-		// silently loses a name clash with dagor's 2-input builtin during init).
+		// CoalesceNStringOp is the N-input variant (the library variant
+		// silently loses a name clash with dagor's 2-input builtin during
+		// init).  Only the three supported lanes feed it; "other" never
+		// reaches here because RejectOtherOp fails the run first.
 		Vertex("final").Op("CoalesceNStringOp").
-		Params(map[string]int{"n": 4}).
+		Params(map[string]int{"n": 3}).
 		Merge(config.MergeCoalesce).
 		Input("Input0", "billing_json").
 		Input("Input1", "bug_json").
 		Input("Input2", "feature_json").
-		Input("Input3", "other_json").
 		Output("Result", "final_brief").
 		Build()
 }
 
-// ─── Driver ────────────────────────────────────────────────────────────────
+// ─── Workflow inputs / outputs ─────────────────────────────────────────────
 
-func main() {
-	var ticketPath string
-	flag.StringVar(&ticketPath, "ticket", "", "path to a ticket text file")
-	flag.Parse()
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+// UserInput is the external boundary of the workflow. In CLI mode it is filled
+// from --ticket (a file path); in MCP mode the SDK derives the tool input
+// schema from this struct and deserializes + validates every tools/call
+// request into it.
+type UserInput struct {
+	Ticket string `json:"ticket" jsonschema:"the full free-text customer-support ticket body to triage; required"`
+}
 
-	if ticketPath == "" {
-		fmt.Fprintln(os.Stderr, "usage: 01-ticket-triager --ticket <file>")
-		os.Exit(2)
-	}
-	raw, err := os.ReadFile(ticketPath)
-	if err != nil {
-		log.Fatalf("read ticket: %v", err)
-	}
-	ticketBody := strings.TrimSpace(string(raw))
-	if ticketBody == "" {
-		log.Fatal("ticket file is empty")
-	}
+// Result is the workflow's structured output: the coalesced lane brief plus
+// the resolved category and the AI vertices that fired. Its shape varies by
+// lane (billing/bug/feature/other), so it is an open object. It is the MCP
+// tool's typed Out (the SDK emits it as structured content + a JSON text
+// block) and the CLI's stdout.
+type Result = map[string]any
 
-	registerPredicates()
+// ─── Shared execution path ─────────────────────────────────────────────────
 
-	// Route every AI op through the per-cost-center factory so each vertex's
-	// credential_ref param maps onto its own CLAUDE_API_KEY_<COSTCENTER> env
-	// var. Must happen before the engine runs Setup() on any AI op.
-	library.SetDefaultAIClientFactory(&costCenterFactory{})
-
+// runWorkflow is the single path shared by CLI and MCP modes. It builds a
+// fresh graph + engine per invocation so concurrent MCP tool calls never share
+// mutable operator state; the ants.Pool is safe to share. The ticket body is
+// injected via context.WithValue exactly as in CLI mode.
+func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
 	g, err := buildGraph()
 	if err != nil {
-		log.Fatalf("build graph: %v", err)
+		return nil, fmt.Errorf("build graph: %w", err)
 	}
-
-	pool, err := ants.NewPool(10)
-	if err != nil {
-		log.Fatalf("create pool: %v", err)
-	}
-	defer pool.Release()
 
 	eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
 	if err != nil {
-		log.Fatalf("create engine: %v", err)
+		return nil, fmt.Errorf("create engine: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	ctx, reasonLog := library.WithReasoningLog(ctx)
-	ctx = context.WithValue(ctx, ticketBodyKey{}, ticketBody)
+	ctx = context.WithValue(ctx, ticketBodyKey{}, strings.TrimSpace(in.Ticket))
 
 	if err := eng.Run(ctx); err != nil {
-		log.Fatalf("run graph: %v", err)
+		return nil, fmt.Errorf("run graph: %w", err)
 	}
 
 	briefRaw, ok := eng.GetOutput("final_brief")
 	if !ok {
-		log.Fatal("final_brief wire missing from graph output")
+		return nil, fmt.Errorf("final_brief wire missing from graph output")
 	}
 	briefPtr, ok := briefRaw.(*string)
 	if !ok || briefPtr == nil {
-		log.Fatalf("unexpected final_brief type: %T", briefRaw)
+		return nil, fmt.Errorf("unexpected final_brief type: %T", briefRaw)
 	}
 
-	var result map[string]any
+	var result Result
 	if err := json.Unmarshal([]byte(*briefPtr), &result); err != nil {
-		log.Fatalf("parse final_brief: %v\nraw: %s", err, *briefPtr)
+		return nil, fmt.Errorf("parse final_brief: %w\nraw: %s", err, *briefPtr)
 	}
 
 	if catRaw, ok := eng.GetOutput("ticket_category"); ok {
@@ -647,7 +623,6 @@ func main() {
 		{"AIBoolOp(bug.regression)", "bug_regression"},
 		{"AIComputeStringToStringOp(feature.summary)", "feature_summary"},
 		{"AIScoreOp(feature.impact)", "feature_impact"},
-		{"AIComputeStringToStringOp(other.ack)", "other_ack"},
 	}
 	fired := []string{}
 	for _, c := range candidates {
@@ -656,6 +631,101 @@ func main() {
 		}
 	}
 	result["ai_nodes"] = fired
+	return result, nil
+}
+
+// ─── MCP server mode ───────────────────────────────────────────────────────
+
+// runMCPServer exposes the workflow as one MCP tool over stdin/stdout. The SDK
+// infers the tool input schema from UserInput, auto-deserializes + validates
+// each request, and (because Out is non-any) emits Result as structured
+// content plus a JSON text block, so the handler returns nil for the result.
+func runMCPServer(pool *ants.Pool) {
+	server := mcp.NewServer(&mcp.Implementation{
+		Name:    "ticket-triager",
+		Version: "1.0.0",
+	}, nil)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "triage_ticket",
+		Description: "Classify a customer-support ticket (billing/bug/feature/other) and run the matching extraction lane, returning a structured brief plus the resolved category.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
+		if strings.TrimSpace(in.Ticket) == "" {
+			return nil, nil, fmt.Errorf("ticket is required")
+		}
+		res, err := runWorkflow(ctx, pool, in)
+		if err != nil {
+			if errors.Is(err, errOtherUnsupported) {
+				return nil, nil, fmt.Errorf("this ticket was classified as \"other\" and cannot be triaged: the triager supports only billing, bug, and feature tickets — please resubmit a ticket that falls into one of those categories")
+			}
+			return nil, nil, err
+		}
+		return nil, res, nil
+	})
+
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		log.Fatalf("mcp server: %v", err)
+	}
+}
+
+// ─── Entrypoint ────────────────────────────────────────────────────────────
+
+func main() {
+	mcpMode := flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
+	var ticketPath string
+	flag.StringVar(&ticketPath, "ticket", "", "path to a ticket text file (CLI mode)")
+	var ticketText string
+	flag.StringVar(&ticketText, "ticket-text", "", "the ticket body as inline text (CLI mode; alternative to --ticket)")
+	flag.Parse()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	registerPredicates()
+
+	// Route every AI op through the per-cost-center factory so each vertex's
+	// credential_ref param maps onto its own CLAUDE_API_KEY_<COSTCENTER> env
+	// var. Must happen before the engine runs Setup() on any AI op.
+	library.SetDefaultAIClientFactory(&costCenterFactory{})
+
+	pool, err := ants.NewPool(10)
+	if err != nil {
+		log.Fatalf("create pool: %v", err)
+	}
+	defer pool.Release()
+
+	if *mcpMode {
+		runMCPServer(pool)
+		return
+	}
+
+	var ticketBody string
+	switch {
+	case ticketText != "" && ticketPath != "":
+		fmt.Fprintln(os.Stderr, "provide either --ticket or --ticket-text, not both")
+		os.Exit(2)
+	case ticketText != "":
+		ticketBody = strings.TrimSpace(ticketText)
+	case ticketPath != "":
+		raw, err := os.ReadFile(ticketPath)
+		if err != nil {
+			log.Fatalf("read ticket: %v", err)
+		}
+		ticketBody = strings.TrimSpace(string(raw))
+	default:
+		fmt.Fprintln(os.Stderr, "usage: 01-ticket-triager (--ticket <file> | --ticket-text <body>) | --mcp")
+		os.Exit(2)
+	}
+	if ticketBody == "" {
+		log.Fatal("ticket is empty")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	ctx, reasonLog := library.WithReasoningLog(ctx)
+
+	result, err := runWorkflow(ctx, pool, UserInput{Ticket: ticketBody})
+	if err != nil {
+		log.Fatalf("workflow: %v", err)
+	}
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

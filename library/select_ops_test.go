@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wwz16/dagor/graph"
+	"github.com/akennis/dagor/graph"
 )
 
 // ─────────────────────────────── Select ───────────────────────────────────────

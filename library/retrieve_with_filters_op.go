@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wwz16/dagor"
-	"github.com/wwz16/dagor/config"
-	"github.com/wwz16/dagor/operator"
+	"github.com/akennis/dagor"
+	"github.com/akennis/dagor/config"
+	"github.com/akennis/dagor/operator"
 )
 
 const RetrieveWithFiltersOpDescription = `RetrieveWithFiltersOp: like RetrieveOp but with filters that scope the retrieval. Filters may come from a runtime Filters input wire (values produced by upstream graph ops — tenant id from an auth step, category from a classifier, date range from a planner), from a compile-time static_filters param (values known when the graph is wired — a hardcoded tenant id, a fixed locale), or both.

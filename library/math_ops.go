@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/wwz16/dagor/config"
-	"github.com/wwz16/dagor/operator"
+	"github.com/akennis/dagor/config"
+	"github.com/akennis/dagor/operator"
 )
 
 // MathOperands aggregates two float64 inputs for AI-powered binary numeric operations.

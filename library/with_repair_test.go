@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wwz16/dagor/config"
+	"github.com/akennis/dagor/config"
 )
 
 // stubRepairable implements RepairableInput. UnmarshalRepair stores the text

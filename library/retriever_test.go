@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wwz16/dagor/config"
+	"github.com/akennis/dagor/config"
 )
 
 // captureSlog redirects the default slog logger to a buffer for the duration

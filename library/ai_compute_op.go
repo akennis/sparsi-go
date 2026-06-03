@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/wwz16/dagor"
-	"github.com/wwz16/dagor/config"
+	"github.com/akennis/dagor"
+	"github.com/akennis/dagor/config"
 )
 
 //go:embed prompts/ai_compute_base.md

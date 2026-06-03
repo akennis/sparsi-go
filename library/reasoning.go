@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/wwz16/dagor"
+	"github.com/akennis/dagor"
 )
 
 // ReasoningEntry records the reasoning produced by one AI op invocation.

@@ -49,7 +49,7 @@ Workflows are DAGs built from operators (ops). Each op is a Go struct with `dag:
 
 **Library ops** are pure deterministic functions in `library/` (math, string, predicate, select, slice, JSON, IO, time). **AI ops** (`AIComputeOp[In, Out]` variants, `ModeSelectOp`, `AIBoolOp`, `AIScoreOp`, …) call Claude via `anthropic-sdk-go` and are the escape hatch for steps that have no deterministic implementation.
 
-End users do not write the `main.go` themselves — they invoke the `sparsi-design` and `sparsi-codegen` skills in Claude Code, which produce a `main.go` + `go.mod` consuming this library. The generated program follows a `UserInput` / `buildGraph` / dual-mode (`--mode cli|mcp`) pattern documented in `skill-src/sparsi-codegen/SKILL.md`.
+End users do not write the `main.go` themselves — they invoke the `sparsi-design` and `sparsi-codegen` skills in Claude Code, which produce a `main.go` + `go.mod` consuming this library. The generated program follows a `UserInput` / `buildGraph` / `runWorkflow` dual-mode pattern documented in `skill-src/sparsi-codegen/SKILL.md`: it runs as a one-shot CLI tool by default, or as a local stdin/stdout MCP server when invoked with the `-mcp` flag (exposing the workflow as a single MCP tool whose input schema is derived from `UserInput`).
 
 ## File layout
 
@@ -88,6 +88,6 @@ sparsi-go/
 
 ## Dependencies
 
-- [`dagor`](https://github.com/wwz16/dagor) — DAG execution engine (replace-directive-pinned to `github.com/akennis/dagor`)
+- [`dagor`](https://github.com/akennis/dagor) — DAG execution engine (v0.1.0)
 - [`anthropic-sdk-go`](https://github.com/anthropics/anthropic-sdk-go) — Claude API client
 - [`ants/v2`](https://github.com/panjf2000/ants) — goroutine worker pool used by examples

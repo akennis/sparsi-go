@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/wwz16/dagor/config"
-	"github.com/wwz16/dagor/operator"
+	"github.com/akennis/dagor/config"
+	"github.com/akennis/dagor/operator"
 )
 
 const CityTimeOpDescription = `CityTimeOp: returns the current time for a supported city.

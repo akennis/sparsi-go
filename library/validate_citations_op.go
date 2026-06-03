@@ -4,9 +4,9 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/wwz16/dagor"
-	"github.com/wwz16/dagor/config"
-	"github.com/wwz16/dagor/operator"
+	"github.com/akennis/dagor"
+	"github.com/akennis/dagor/config"
+	"github.com/akennis/dagor/operator"
 )
 
 const ValidateCitationsOpDescription = `ValidateCitationsOp: filters LLM-emitted citations against an allow-list of source identifiers — a security control. Hallucinated source names (anything the model invents or imports from its training corpus) are dropped; only entries that exactly match a member of the allow-list survive into Accepted. Use this op to enforce citation integrity at the boundary between an untrusted AI op and a downstream surface (UI, audit log, database write).

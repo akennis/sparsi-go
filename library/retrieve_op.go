@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/wwz16/dagor"
-	"github.com/wwz16/dagor/config"
-	"github.com/wwz16/dagor/operator"
+	"github.com/akennis/dagor"
+	"github.com/akennis/dagor/config"
+	"github.com/akennis/dagor/operator"
 )
 
 const RetrieveOpDescription = `RetrieveOp: pulls the top-k documents most relevant to a query from a registered Retriever (RAG fan-in).

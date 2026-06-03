@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wwz16/dagor"
-	"github.com/wwz16/dagor/config"
+	"github.com/akennis/dagor"
+	"github.com/akennis/dagor/config"
 )
 
 const MCPCallOpDescription = `MCPCallOp: invoke a single MCP server tool as a DAG step.
