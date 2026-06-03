@@ -44,12 +44,15 @@ Read the following references before writing any code:
 7. If the build fails, read the error output, fix `main.go`, and re-run step 6.
 8. Repeat until the build exits 0.
 9. **Runtime Validation:** You MUST verify the behavioral correctness of the generated program before finishing. Run the compiled executable (`.\solution.exe` on Windows, `./solution` on Unix) with representative sample inputs (based on the original task description) **and the `-v` flag enabled to ensure all debug logging is visible in the verification output.**
-    - **Live API Keys:** Tests and validation MUST use actual API keys (read from environment variables) for any third-party services (LLMs, etc.) used by the workflow. Do NOT use dummy, mock, or placeholder keys. Ensure your environment has the necessary `CLAUDE_API_KEY`, `GEMINI_API_KEY`, or other required keys set before running.
+    - **Live API Keys:** Tests and validation MUST use actual API keys (read from environment variables) for any third-party services (LLMs, data APIs, etc.) used by the workflow. Do NOT use dummy, mock, or placeholder keys. Ensure your environment has the necessary `CLAUDE_API_KEY`, `GEMINI_API_KEY`, or other required keys set before running.
+    - **Data API Rate Limit Detection:** During validation, monitor logs for rate limit errors from external data services (e.g., "429 Too Many Requests" from a weather API, stock data provider, or search engine). If detected, inform the user which data API is hitting the limit.
+    - **Suggest Alternatives:** If a data API is hitting rate limits, suggest alternative APIs or providers that offer similar data (e.g., if OpenWeatherMap is limited, suggest WeatherAPI.com; if Alpha Vantage is limited, suggest Polygon.io). Do NOT autonomously change the API in the code without user approval, as this diverges from the approved design.
     - If CLI flags are required, provide them.
     - Inspect the output and logs (which will include the reporter's vertex-level detail thanks to `-v`) to ensure the workflow is executing the expected vertices and producing the correct results.
 10. **Iterate on Runtime Failures:** If the program crashes, produces incorrect results, or fails to meet the task requirements:
     - Diagnose the root cause from the output/logs.
-    - Fix `main.go` or any custom op implementations.
+    - **Handling Data API Rate Limits:** If the failure is due to exhausted rate limits on an external data provider, do not attempt to "fix" it by changing the code. Instead, report the specific limit hit to the user and ask if they would like to switch to an alternative provider as a workaround. Provide 1-2 specific suggestions for alternative services that provide equivalent data.
+    - Fix `main.go` or any custom op implementations for non-rate-limit failures.
     - Repeat from Step 6 (rebuild and re-validate).
 11. Once the build and runtime behavior are both verified, notify the user and recommend running the compiled executable. Mention the exact command and CLI flags used for successful validation. Ensure ONLY the final `solution.exe` (Windows) or `solution` (Unix) executable remains in the directory. Remove any intermediate or failed build artifacts.
 
