@@ -91,14 +91,14 @@ func buildGraph() (*graph.Graph, error) {
 	b.Vertex("parse_price").Op("AIParseNumberOp").
 		Params(map[string]string{
 			"provider": "gemini",
-			"model":    "gemini-3-flash-preview",
+			"model":    "gemini-3.5-flash",
 		}).
 		Input("Input", "price_raw").Output("Result", "price")
 
 	b.Vertex("parse_prev").Op("AIParseNumberOp").
 		Params(map[string]string{
 			"provider": "gemini",
-			"model":    "gemini-3-flash-preview",
+			"model":    "gemini-3.5-flash",
 		}).
 		Input("Input", "prev_raw").Output("Result", "prev_close")
 
@@ -110,7 +110,7 @@ func buildGraph() (*graph.Graph, error) {
 	b.Vertex("sentiment").Op("AIScoreOp").
 		Params(map[string]string{
 			"provider":  "gemini",
-			"model":     "gemini-3-flash-preview",
+			"model":     "gemini-3.5-flash",
 			"criterion": "The headline indicates a positive/bullish outlook for the company",
 		}).
 		Input("Input", "headline").Output("Result", "sentiment_score")
@@ -147,7 +147,7 @@ func buildGraph() (*graph.Graph, error) {
 	b.Vertex("recommend").Op("AIComputeStringToStringOp").
 		Params(map[string]string{
 			"provider":  "gemini",
-			"model":     "gemini-3-flash-preview",
+			"model":     "gemini-3.5-flash",
 			"operation": "Analyze the given stock data and sentiment to provide a Buy/Hold/Sell recommendation.",
 		}).
 		Input("Input", "final_prompt").

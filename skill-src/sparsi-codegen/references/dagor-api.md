@@ -331,27 +331,36 @@ func init() { operator.RegisterOp[MyOp]() }
 ## HOW TO RUN A DAGOR GRAPH — exact pattern
 
 ```go
-// Setup logging (once, before pool and engine)
-slogLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-slog.SetDefault(slogLogger)
+// 1. Parse CLI flags
+input := flag.String("input", "", "input text to process")
+verbose := flag.Bool("v", false, "enable verbose (debug) logging")
+flag.Parse()
+if *input == "" { log.Fatal("--input is required") }
 
-// Build graph
+// 2. Setup logging (toggled by -v)
+level := slog.LevelInfo
+if *verbose {
+    level = slog.LevelDebug
+}
+slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+
+// 3. Build graph
 g, err := buildGraph()
 if err != nil { log.Fatal(err) }
 
-// Create pool and engine
+// 4. Create pool and engine
 pool, _ := ants.NewPool(10)
 defer pool.Release()
 eng, err := dagor.NewEngine(g, pool, dagor.WithReporter(reporter.New(slog.Default())))
 if err != nil { log.Fatal(err) }
 
-// Store external inputs in context, then run
+// 5. Store external inputs in context, then run
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 defer cancel()
-ctx = context.WithValue(ctx, inputKey, userInput) // inject external values HERE
+ctx = context.WithValue(ctx, inputKey, *input) // inject external values HERE
 if err := eng.Run(ctx); err != nil { log.Fatal(err) }
 
-// Read results
+// 6. Read results
 raw, ok := eng.GetOutput("final_wire") // returns (any, bool)
 if ok {
     result := raw.(*string) // cast to concrete pointer type

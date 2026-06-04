@@ -370,8 +370,8 @@ used in **Design Rationale** so codegen emits the matching
 When a workflow requires AI operations (e.g., `AIBoolOp`, `AIComputeOp`, `AIRerankOp`), you MUST ask the user for their preferred AI provider and model if they haven't specified them.
 
 - **Default:** If the user has no preference, the library defaults to `provider: "claude"`, `model: "claude-sonnet-4-6"`.
-- **Options:** Mention that `provider: "gemini"`, `model: "gemini-3-flash-preview"` is a common alternative.
-- **Elicitation:** Ask: "Which AI provider and model would you like to use for the AI steps? (e.g., Claude Sonnet 4.6, Gemini 3 Flash Preview)".
+- **Options:** Mention that `provider: "gemini", model: "gemini-3.5-flash"` is a common alternative.
+- **Elicitation:** Ask: "Which AI provider and model would you like to use for the AI steps? (e.g., Claude Sonnet 4.6, Gemini 3.5 Flash)".
 
 Do this before or as part of presenting your initial design.
 
@@ -404,6 +404,18 @@ Do this before or as part of presenting your initial design.
 7. Present the design to the user. Ask: "Does this design look right? Any changes before I hand it to codegen?"
 8. If the user provides feedback, incorporate it and redraft. Repeat until explicit approval.
 9. The final approved design is the output — do not proceed to code generation.
+
+# LLM Efficiency & Token Usage
+
+Every token sent to an LLM adds cost and latency. When a workflow fetches data from an external API, database, or MCP server to provide context for an AI op, you MUST design the fetching and processing steps to be as surgical as possible. Do NOT pass the entire result of an API call to the LLM if only a small subset is relevant.
+
+**Efficiency patterns:**
+1. **Filtering at the source:** Use API-side filtering (query params, SQL `WHERE` clauses, search filters) to reduce the initial payload size.
+2. **Deterministic pruning:** Use deterministic ops to filter, slice, or summarize the fetched data before it reaches the AI op. For example, if you fetch a large dataset but only need the most recent entries or specific metrics, use deterministic ops (or custom ops) to truncate or aggregate the data.
+3. **Structured extraction:** If you fetch a large JSON blob but only need a few fields, use `JSONExtractOp` or a custom parse op to extract only those fields.
+4. **Summarization fallback:** Only use `AISummarizeOp` to shorten context if deterministic pruning is impossible (e.g., the data is unstructured natural language).
+
+In your **Design Rationale**, explicitly mention how you are minimizing token usage for any vertex that feeds external data into an AI op.
 
 # Refinement loop
 

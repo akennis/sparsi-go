@@ -160,6 +160,26 @@ CRITICAL — the AI op's sole responsibility is PARSING, CLASSIFICATION, or INTE
 It must NOT directly answer the question or solve the problem. Its output feeds downstream deterministic
 ops that perform the actual computation.
 
+# LLM EFFICIENCY & TOKEN USAGE
+Every token sent to an LLM adds cost and latency. When a workflow fetches data from an external API,
+database, or MCP server to provide context for an AI op, you MUST design the fetching and processing
+steps to be as surgical as possible. Do NOT pass the entire result of an API call to the LLM if only
+a small subset is relevant.
+
+**Efficiency patterns:**
+1. **Filtering at the source:** Use API-side filtering (query params, SQL `WHERE` clauses, search filters)
+   to reduce the initial payload size.
+2. **Deterministic pruning:** Use deterministic ops to filter, slice, or summarize the fetched data
+   before it reaches the AI op. For example, if you fetch a large dataset but only need the most recent
+   entries or specific metrics, use deterministic ops (or custom ops) to truncate or aggregate the data.
+3. **Structured extraction:** If you fetch a large JSON blob but only need a few fields, use
+   `JSONExtractOp` or a custom parse op to extract only those fields.
+4. **Summarization fallback:** Only use `AISummarizeOp` to shorten context if deterministic pruning
+   is impossible (e.g., the data is unstructured natural language).
+
+In your **Design Rationale**, explicitly mention how you are minimizing token usage for any vertex that
+feeds external data into an AI op.
+
 # MAP NODES
 A map node fans out a sub-graph over every element of a slice input concurrently, then
 collects the per-element results into a single output wire. Use a map node whenever the
