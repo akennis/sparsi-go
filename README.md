@@ -37,49 +37,29 @@ Today's agents are interpreters. They re-derive the same routines — classify, 
 
 ## Quick Start
 
-### 1. Install the library
+The fastest way to build Sparsi workflows is using our bundled skills. They allow you to design and generate Go code automatically within your AI assistant.
+
+### 1. Download the Skills
+Download the latest bundle from [Releases](https://github.com/akennis/sparsi-go/releases).
+
+### 2. Install the Skills
+Copy the `sparsi-design` and `sparsi-codegen` directories to your assistant's skills folder:
+
+**macOS / Linux:**
 ```bash
-go get github.com/akennis/sparsi-go@main
+cp -r sparsi-design sparsi-codegen ~/.claude/skills/
 ```
 
-### 2. A Minimal Workflow
-Create a simple DAG that concatenates two strings:
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"github.com/akennis/dagor/graph"
-	"github.com/akennis/sparsi-go/library"
-)
-
-func main() {
-	library.RegisterConst("greeting", "Hello, ")
-	library.RegisterConst("subject", "world")
-
-	g, _ := graph.NewBuilder("hello").
-		Vertex("a").Op("greeting").Output("Result", "a").
-		Vertex("b").Op("subject").Output("Result", "b").
-		Vertex("greet").Op("StringConcatOp").
-		Input("A", "a").Input("B", "b").Output("Result", "out").
-		Build()
-
-	// ... (See examples for engine setup)
-}
+**Windows (PowerShell):**
+```powershell
+Copy-Item -Recurse sparsi-design, sparsi-codegen "$env:USERPROFILE\.claude\skills\"
 ```
 
----
-
-## Skills
-
-The fastest way to build Sparsi workflows is using our bundled skills. They help you design the DAG and generate the Go code automatically within your preferred AI assistant.
-
-| Skill | Trigger | Purpose |
-|---|---|---|
-| `sparsi-design` | `/sparsi-design` | Design a deterministic DAG from a task description. |
-| `sparsi-codegen` | `/sparsi-codegen` | Generate `main.go` and `go.mod` from an approved design. |
+### 3. Start Designing
+Invoke the design skill from your assistant with your task description:
+```bash
+/sparsi-design <your task here>
+```
 
 ---
 
