@@ -31,7 +31,9 @@ const ModeSelectOpDescription = `ModeSelectOp: AI-powered classifier — maps ar
 // dispatch to the correct branch based on what the input represents.
 type ModeSelectOp struct {
 	Input  *string `dag:"input"`
-	Result string  `dag:"output"`
+	Result            string  `dag:"output"`
+	UsageInputTokens  int64   `dag:"output"`
+	UsageOutputTokens int64   `dag:"output"`
 
 	categories []string
 	maxRetries int
@@ -72,7 +74,11 @@ func (op *ModeSelectOp) Setup(params *config.Params) error {
 	return nil
 }
 
-func (op *ModeSelectOp) Reset() error { return nil }
+func (op *ModeSelectOp) Reset() error {
+	op.UsageInputTokens = 0
+	op.UsageOutputTokens = 0
+	return nil
+}
 
 func (op *ModeSelectOp) Run(ctx context.Context) error {
 	slog.DebugContext(ctx, "ModeSelectOp.run", "run_id", dagor.RunID(ctx), "categories", op.categories)
@@ -114,6 +120,8 @@ func (op *ModeSelectOp) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("generate content: %w", err)
 		}
+		op.UsageInputTokens += res.InputTokens
+		op.UsageOutputTokens += res.OutputTokens
 		slog.InfoContext(ctx, "ModeSelectOp.tokens", "run_id", dagor.RunID(ctx), "input_tokens", res.InputTokens, "output_tokens", res.OutputTokens)
 
 		raw := strings.TrimSpace(res.Text)

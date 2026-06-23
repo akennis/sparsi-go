@@ -68,8 +68,10 @@ type AIResponseParser interface {
 // Do not register AIComputeOp directly — use a concrete variant like AIComputeMathOperandsToFloat64Op.
 type AIComputeOp[In, Out any] struct {
 	Input     *In    // single strongly-typed input
-	Result    Out    // single strongly-typed output
-	Reasoning string // always present
+	Result            Out    // single strongly-typed output
+	Reasoning         string // always present
+	UsageInputTokens  int64
+	UsageOutputTokens int64
 
 	operation  string
 	maxRetries int
@@ -108,7 +110,9 @@ func (op *AIComputeOp[In, Out]) InputFields() map[string]any {
 
 func (op *AIComputeOp[In, Out]) OutputFields() map[string]any {
 	return map[string]any{
-		"Result": &op.Result,
+		"Result":            &op.Result,
+		"UsageInputTokens":  &op.UsageInputTokens,
+		"UsageOutputTokens": &op.UsageOutputTokens,
 	}
 }
 
@@ -132,6 +136,8 @@ func (op *AIComputeOp[In, Out]) ResetFields() {
 	var zeroResult Out
 	op.Result = zeroResult
 	op.Reasoning = ""
+	op.UsageInputTokens = 0
+	op.UsageOutputTokens = 0
 }
 
 func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
@@ -214,6 +220,8 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("generate content: %w", err)
 		}
+		op.UsageInputTokens += res.InputTokens
+		op.UsageOutputTokens += res.OutputTokens
 		slog.InfoContext(ctx, "AIComputeOp.tokens", "run_id", dagor.RunID(ctx), "model", op.model, "input_tokens", res.InputTokens, "output_tokens", res.OutputTokens)
 
 		raw := strings.TrimSpace(res.Text)
@@ -264,7 +272,7 @@ func (op *AIComputeOp[In, Out]) Run(ctx context.Context) error {
 				// Enter / continue conversational repair.
 				history = append(history, aiTurn{Role: "user", Text: sentPrompt})
 				history = append(history, aiTurn{Role: "assistant", Text: raw})
-				nextPrompt = rep.Prompt
+				nextPrompt = fmt.Sprintf("%s Error details: %v", rep.Prompt, rep.Cause)
 				conversational = true
 				slog.DebugContext(ctx, "AIComputeOp.repair.semantic", "run_id", dagor.RunID(ctx), "attempt", attempt+1, "cause", rep.Cause)
 				continue
@@ -318,13 +326,13 @@ func (op *AIComputeOp[In, Out]) parseResult(raw string) error {
 	case *float64:
 		f, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
-			return fmt.Errorf("expected float64, got %q: %w", raw, err)
+			return &ErrRepairable{Prompt: "The response was not in the expected format. Please correct it.", Cause: fmt.Errorf("expected float64, got %q: %w", raw, err)}
 		}
 		*v = f
 	case *int:
 		n, err := strconv.Atoi(raw)
 		if err != nil {
-			return fmt.Errorf("expected int, got %q: %w", raw, err)
+			return &ErrRepairable{Prompt: "The response was not in the expected format. Please correct it.", Cause: fmt.Errorf("expected int, got %q: %w", raw, err)}
 		}
 		*v = n
 	case *string:
@@ -343,7 +351,7 @@ func (op *AIComputeOp[In, Out]) parseResult(raw string) error {
 			}
 			f, err := strconv.ParseFloat(p, 64)
 			if err != nil {
-				return fmt.Errorf("expected []float64 CSV, got %q: %w", raw, err)
+				return &ErrRepairable{Prompt: "The response was not in the expected format. Please correct it.", Cause: fmt.Errorf("expected []float64 CSV, got %q: %w", raw, err)}
 			}
 			s = append(s, f)
 		}
@@ -369,7 +377,7 @@ func (op *AIComputeOp[In, Out]) parseResult(raw string) error {
 		case "false", "no":
 			*v = false
 		default:
-			return fmt.Errorf("expected bool (true/false), got %q", raw)
+			return &ErrRepairable{Prompt: "The response was not in the expected format. Please correct it.", Cause: fmt.Errorf("expected bool (true/false), got %q", raw)}
 		}
 	case *map[string]string:
 		if raw == "" {
@@ -384,7 +392,7 @@ func (op *AIComputeOp[In, Out]) parseResult(raw string) error {
 			}
 			idx := strings.IndexByte(pair, '=')
 			if idx < 0 {
-				return fmt.Errorf("expected key=value pair, got %q", pair)
+				return &ErrRepairable{Prompt: "The response was not in the expected format. Please correct it.", Cause: fmt.Errorf("expected key=value pair, got %q", pair)}
 			}
 			m[strings.TrimSpace(pair[:idx])] = strings.TrimSpace(pair[idx+1:])
 		}
@@ -403,7 +411,7 @@ func (op *AIComputeOp[In, Out]) parseResult(raw string) error {
 			}
 			n, err := strconv.Atoi(p)
 			if err != nil {
-				return fmt.Errorf("expected []int CSV, got %q: %w", raw, err)
+				return &ErrRepairable{Prompt: "The response was not in the expected format. Please correct it.", Cause: fmt.Errorf("expected []int CSV, got %q: %w", raw, err)}
 			}
 			s = append(s, n)
 		}
@@ -413,7 +421,10 @@ func (op *AIComputeOp[In, Out]) parseResult(raw string) error {
 	default:
 		// Fallback: attempt JSON unmarshal for unknown types that implement json.Unmarshaler
 		if err := json.Unmarshal([]byte(raw), &op.Result); err != nil {
-			return fmt.Errorf("unsupported output type %T; implement AIResponseParser", op.Result)
+			return &ErrRepairable{
+				Prompt: "The response was not in the expected format. Please correct it.",
+				Cause:  fmt.Errorf("unsupported output type %T; implement AIResponseParser. Error: %w", op.Result, err),
+			}
 		}
 	}
 	return nil
