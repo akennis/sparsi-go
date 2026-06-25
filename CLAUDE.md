@@ -40,6 +40,8 @@ go generate ./...
 
 - `CLAUDE_API_KEY` — required at runtime for AI library ops (the default Claude provider).
 - `GEMINI_API_KEY` — only needed for ops or examples that select `provider: "gemini"`.
+- `OPENAI_API_KEY` — only needed for ops that select `provider: "openai"`.
+- `OPENAI_BASE_URL` — optional; point the `openai` provider at an OpenAI-compatible server (e.g. `http://localhost:11434/v1` for a local Ollama instance). When set with an empty `OPENAI_API_KEY`, a placeholder key is used so auth-free local servers work.
 
 Neither is needed to build the library or regenerate the skills bundle.
 

@@ -63,7 +63,7 @@ type AIResponseParser interface {
 }
 
 // AIComputeOp is a generic AI-powered compute operator.
-// Vertex params: provider ("claude"|"gemini", default "claude"), model (default "claude-sonnet-4-6").
+// Vertex params: provider ("claude"|"gemini"|"openai", default "claude"), model (default "claude-sonnet-4-6").
 // In is the input type, Out is the output type.
 // Do not register AIComputeOp directly — use a concrete variant like AIComputeMathOperandsToFloat64Op.
 type AIComputeOp[In, Out any] struct {

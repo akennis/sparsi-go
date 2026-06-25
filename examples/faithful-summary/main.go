@@ -10,6 +10,13 @@
 // generated a summary has already committed to its framing — a second,
 // independent model is more likely to surface unsupported claims.
 //
+// Each step's provider and model are configurable. With no flags the workflow
+// uses the defaults above (Claude summarizes, Gemini verifies); the
+// -summarize-provider / -summarize-model and -verify-provider / -verify-model
+// flags override either step independently. Pointing a step at provider
+// "openai" also reaches any OpenAI-compatible server — e.g. a local Ollama
+// model via the OPENAI_BASE_URL env var.
+//
 // The program is dual-mode: a one-shot CLI tool by default, or a local
 // stdin/stdout MCP server when invoked with -mcp (exposing the workflow as a
 // single MCP tool whose input is deserialized out of each tools/call request).
@@ -101,17 +108,41 @@ func init() {
 	}
 }
 
+// ─── Model configuration ───────────────────────────────────────────────────
+
+// modelConfig selects the provider+model for each AI step in the workflow. The
+// two steps are configured independently so the summarizer and the verifier can
+// run on different models (the original cross-model pattern) or be pointed at a
+// local OpenAI-compatible server (e.g. provider "openai" + an Ollama model).
+type modelConfig struct {
+	summarizeProvider string
+	summarizeModel    string
+	verifyProvider    string
+	verifyModel       string
+}
+
+// defaultModelConfig reproduces the original hard-coded pairing: Claude
+// summarizes, Gemini verifies. The example runs with no CLI flags using these.
+func defaultModelConfig() modelConfig {
+	return modelConfig{
+		summarizeProvider: "claude",
+		summarizeModel:    "claude-sonnet-4-6",
+		verifyProvider:    "gemini",
+		verifyModel:       "gemini-3.5-flash",
+	}
+}
+
 // ─── Graph ─────────────────────────────────────────────────────────────────
 
-func buildGraph() (*graph.Graph, error) {
+func buildGraph(cfg modelConfig) (*graph.Graph, error) {
 	return graph.NewBuilder("faithful_summary").
 		Vertex("source_const").Op("source_const").
 		Output("Result", "source").
 		Vertex("summarize").Op("AIComputeStringToStringOp").
 		Params(map[string]string{
 			"operation": "summarize this article in 3–5 concise sentences; include only information explicitly stated in the text, do not add context or draw inferences",
-			"provider":  "claude",
-			"model":     "claude-sonnet-4-6",
+			"provider":  cfg.summarizeProvider,
+			"model":     cfg.summarizeModel,
 		}).
 		Input("Input", "source").
 		Output("Result", "summary").
@@ -122,8 +153,8 @@ func buildGraph() (*graph.Graph, error) {
 		Vertex("verify").Op("AIBoolOp").
 		Params(map[string]string{
 			"predicate": "does every factual claim in the summary appear in or follow directly from the source document, with no information added or invented?",
-			"provider":  "gemini",
-			"model":     "gemini-3.5-flash",
+			"provider":  cfg.verifyProvider,
+			"model":     cfg.verifyModel,
 		}).
 		Input("Input", "query").
 		Output("Result", "faithful").
@@ -153,8 +184,8 @@ type Result struct {
 // fresh graph + engine per invocation so concurrent MCP tool calls never share
 // mutable operator state; the ants.Pool is safe to share. The input is
 // injected via context.WithValue (NOT eng.SetInput) exactly as in CLI mode.
-func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, error) {
-	g, err := buildGraph()
+func runWorkflow(ctx context.Context, pool *ants.Pool, cfg modelConfig, in UserInput) (Result, error) {
+	g, err := buildGraph(cfg)
 	if err != nil {
 		return Result{}, fmt.Errorf("build graph: %w", err)
 	}
@@ -190,7 +221,7 @@ func runWorkflow(ctx context.Context, pool *ants.Pool, in UserInput) (Result, er
 // infers the tool input schema from UserInput, auto-deserializes + validates
 // each request, and (because Out is non-any) emits Result as structured
 // content plus a JSON text block, so the handler returns nil for the result.
-func runMCPServer(pool *ants.Pool) {
+func runMCPServer(pool *ants.Pool, cfg modelConfig) {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "faithful-summary",
 		Version: "1.0.0",
@@ -204,7 +235,7 @@ func runMCPServer(pool *ants.Pool) {
 		if in.Text == "" {
 			return nil, Result{}, fmt.Errorf("text is required")
 		}
-		res, err := runWorkflow(ctx, pool, in)
+		res, err := runWorkflow(ctx, pool, cfg, in)
 		if err != nil {
 			return nil, Result{}, err // surfaced to the client as an error result
 		}
@@ -221,10 +252,22 @@ func runMCPServer(pool *ants.Pool) {
 // ─── Entrypoint ────────────────────────────────────────────────────────────
 
 func main() {
+	def := defaultModelConfig()
 	mcpMode := flag.Bool("mcp", false, "run as a stdio MCP server instead of a one-shot CLI")
 	file := flag.String("file", "", "path to a text file to summarize (CLI mode)")
 	text := flag.String("text", "", "inline source text to summarize (CLI mode)")
+	summarizeProvider := flag.String("summarize-provider", def.summarizeProvider, `AI provider for the summary step ("claude", "gemini", or "openai")`)
+	summarizeModel := flag.String("summarize-model", def.summarizeModel, "model name for the summary step")
+	verifyProvider := flag.String("verify-provider", def.verifyProvider, `AI provider for the faithfulness-check step ("claude", "gemini", or "openai")`)
+	verifyModel := flag.String("verify-model", def.verifyModel, "model name for the faithfulness-check step")
 	flag.Parse()
+
+	cfg := modelConfig{
+		summarizeProvider: *summarizeProvider,
+		summarizeModel:    *summarizeModel,
+		verifyProvider:    *verifyProvider,
+		verifyModel:       *verifyModel,
+	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	pool, err := ants.NewPool(10)
@@ -234,7 +277,7 @@ func main() {
 	defer pool.Release()
 
 	if *mcpMode {
-		runMCPServer(pool)
+		runMCPServer(pool, cfg)
 		return
 	}
 
@@ -255,7 +298,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	res, err := runWorkflow(ctx, pool, UserInput{Text: source})
+	res, err := runWorkflow(ctx, pool, cfg, UserInput{Text: source})
 	if err != nil {
 		log.Fatalf("workflow: %v", err)
 	}

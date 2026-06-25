@@ -521,9 +521,9 @@ Vertex("classify").Op("AIBoolOp").
 **Multi-factory recipe — two vertices, two credential sources.** When the
 design fans out across tenants / regions / dev-prod, register a factory
 per id and set distinct ids on each vertex. The factory registry is
-orthogonal to `provider` and `model`: one factory can back both Claude
-and Gemini vertices, and the same provider can be served by different
-factories per vertex.
+orthogonal to `provider` and `model`: one factory can back Claude,
+Gemini, and OpenAI vertices, and the same provider can be served by
+different factories per vertex.
 
 ```go
 // main() — register every factory the design names BEFORE buildGraph.
@@ -556,10 +556,15 @@ Rules:
 - `client_factory_id` is optional; omit it on vertices that should use the
   process default.
 - The factory type must be defined in `main.go` (or a sibling file in
-  `<output_dir>/`) and implement both `Anthropic(ctx, ref)` and
-  `Gemini(ctx, ref)` methods returning `*anthropic.Client` / `*genai.Client`.
-  Both methods receive a context bounded by `api_factory_timeout_ms` (default
-  30 s); factories that do network I/O MUST honor `ctx.Done()`.
+  `<output_dir>/`) and implement all three of `Anthropic(ctx, ref)`,
+  `Gemini(ctx, ref)`, and `OpenAI(ctx, ref)`, returning `*anthropic.Client`
+  / `*genai.Client` / `*openai.Client` respectively (import
+  `"github.com/openai/openai-go"`). A factory that only serves some providers
+  should return an error from the unused methods. The `OpenAI` client also
+  serves any OpenAI-compatible endpoint (e.g. a local Ollama server) — set the
+  base URL when constructing it via `option.WithBaseURL`. All three methods
+  receive a context bounded by `api_factory_timeout_ms` (default 30 s);
+  factories that do network I/O MUST honor `ctx.Done()`.
 - `api_factory_timeout_ms` is an optional vertex param (string, ms) that caps
   the factory credential lookup at Setup; emit it only when the design's
   vertex line specifies it. `"0"` disables the deadline.

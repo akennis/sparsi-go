@@ -11,6 +11,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/akennis/dagor/config"
+	"github.com/openai/openai-go"
 	"google.golang.org/genai"
 )
 
@@ -69,7 +70,9 @@ func parseRetryConfig(params *config.Params) retryConfig {
 }
 
 // newAICaller creates a caller for the given provider and model, wrapped with exponential backoff.
-// provider must be "claude" or "gemini"; model is passed through opaquely to the SDK.
+// provider must be "claude", "gemini", or "openai"; model is passed through opaquely to the SDK.
+// The "openai" provider also serves any OpenAI-compatible endpoint (e.g. a local Ollama server);
+// the endpoint is selected by the factory, not by this call.
 // ref and factoryID select credentials: ref is passed through to the factory verbatim,
 // factoryID selects which registered factory to use (empty → process default).
 // Returns an error for unknown providers or factory failures so graphs fail fast at Setup.
@@ -95,8 +98,14 @@ func newAICaller(provider, model, ref, factoryID string, cfg retryConfig) (aiCal
 			return nil, fmt.Errorf("gemini client: %w", err)
 		}
 		inner = &geminiCaller{model: model, client: c}
+	case "openai":
+		c, err := factory.OpenAI(ctx, ref)
+		if err != nil {
+			return nil, fmt.Errorf("openai client: %w", err)
+		}
+		inner = &openaiCaller{model: model, client: c}
 	default:
-		return nil, fmt.Errorf("unsupported provider %q: must be \"claude\" or \"gemini\"", provider)
+		return nil, fmt.Errorf("unsupported provider %q: must be \"claude\", \"gemini\", or \"openai\"", provider)
 	}
 	if cfg.maxRetries <= 0 {
 		return inner, nil
@@ -234,5 +243,48 @@ func (c *geminiCaller) call(ctx context.Context, req aiCallRequest) (aiCallResul
 		Text:         text,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
+	}, nil
+}
+
+// openaiCaller calls the OpenAI Chat Completions API. The same code path serves
+// OpenAI itself and any OpenAI-compatible server (e.g. a local Ollama instance);
+// which endpoint is hit is decided by the factory that built the client.
+// The SDK client is built once at Setup via AIClientFactory.
+type openaiCaller struct {
+	model  string
+	client *openai.Client
+}
+
+func (c *openaiCaller) call(ctx context.Context, req aiCallRequest) (aiCallResult, error) {
+	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(req.History)+2)
+	if req.SystemText != "" {
+		messages = append(messages, openai.SystemMessage(req.SystemText))
+	}
+	for _, t := range req.History {
+		if t.Role == "assistant" {
+			messages = append(messages, openai.AssistantMessage(t.Text))
+		} else {
+			messages = append(messages, openai.UserMessage(t.Text))
+		}
+	}
+	messages = append(messages, openai.UserMessage(req.Prompt))
+	resp, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model:     openai.ChatModel(c.model),
+		Messages:  messages,
+		MaxTokens: openai.Int(req.MaxTokens),
+	})
+	if err != nil {
+		return aiCallResult{}, fmt.Errorf("openai: chat completion: %w", err)
+	}
+	var text string
+	if len(resp.Choices) > 0 {
+		text = resp.Choices[0].Message.Content
+	} else {
+		slog.WarnContext(ctx, "openai.empty", "model", c.model)
+	}
+	return aiCallResult{
+		Text:         text,
+		InputTokens:  resp.Usage.PromptTokens,
+		OutputTokens: resp.Usage.CompletionTokens,
 	}, nil
 }

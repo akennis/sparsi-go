@@ -6,6 +6,7 @@ require (
 	github.com/akennis/dagor v0.1.0
 	github.com/anthropics/anthropic-sdk-go v1.37.0
 	github.com/modelcontextprotocol/go-sdk v1.6.0
+	github.com/openai/openai-go v1.12.0
 	github.com/panjf2000/ants/v2 v2.12.0
 	google.golang.org/genai v1.55.0
 )
