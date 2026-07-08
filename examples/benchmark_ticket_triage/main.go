@@ -145,8 +145,37 @@ type ClassifyIntentOp struct {
 	library.AIComputeOp[string, IntentResult]
 }
 
-type CheckPolicyOp struct {
-	library.AIComputeOp[string, PolicyResult]
+type DeterministicPolicyOp struct {
+	IntentResult *IntentResult `dag:"input"`
+	Result       PolicyResult  `dag:"output"`
+}
+
+func (op *DeterministicPolicyOp) Setup(_ *config.Params) error { return nil }
+func (op *DeterministicPolicyOp) Reset() error                 { return nil }
+func (op *DeterministicPolicyOp) Run(_ context.Context) error {
+	intent := ""
+	if op.IntentResult != nil {
+		intent = op.IntentResult.Intent
+	}
+	op.Result = PolicyResult{PolicyAction: getTruePolicy(intent)}
+	return nil
+}
+func (op *DeterministicPolicyOp) InputFields() map[string]any {
+	return map[string]any{"IntentResult": &op.IntentResult}
+}
+func (op *DeterministicPolicyOp) OutputFields() map[string]any {
+	return map[string]any{"Result": &op.Result}
+}
+func (op *DeterministicPolicyOp) SetInputField(field string, value any) error {
+	if field == "IntentResult" {
+		op.IntentResult = value.(*IntentResult)
+		return nil
+	}
+	return fmt.Errorf("unknown field")
+}
+func (op *DeterministicPolicyOp) ResetFields() {
+	op.IntentResult = nil
+	op.Result = PolicyResult{}
 }
 
 type DraftResponseOp struct {
@@ -483,7 +512,7 @@ func init() {
 
 	operator.RegisterOp[AnalyzeSentimentOp]()
 	operator.RegisterOp[ClassifyIntentOp]()
-	operator.RegisterOp[CheckPolicyOp]()
+	operator.RegisterOp[DeterministicPolicyOp]()
 	operator.RegisterOp[DraftResponseOp]()
 }
 
@@ -532,23 +561,10 @@ func buildSparsiGraph() *graph.Graph {
 		Output("UsageInputTokens", "in3").
 		Output("UsageOutputTokens", "out3").
 
-		// Helper: Format Policy Context
-		Vertex("format_policy_ctx").Op("FormatPolicyContextOp").
-		Input("Intent", "intent_json").
-		Input("Sentiment", "sentiment_json").
-		Output("Result", "policy_ctx").
-
 		// 4. Check Policy
-		Vertex("check_policy").Op("CheckPolicyOp").
-		Params(map[string]string{
-			"provider":  "gemini",
-			"model":     "gemini-3.1-flash-lite",
-			"operation": PROMPTS["sparsi_policy"],
-		}).
-		Input("Input", "policy_ctx").
+		Vertex("check_policy").Op("DeterministicPolicyOp").
+		Input("IntentResult", "intent_json").
 		Output("Result", "policy_json").
-		Output("UsageInputTokens", "in4").
-		Output("UsageOutputTokens", "out4").
 
 		// Helper: Format Draft Context
 		Vertex("format_draft_ctx").Op("FormatDraftContextOp").
@@ -582,7 +598,6 @@ func buildSparsiGraph() *graph.Graph {
 		Vertex("sum_tokens").Op("Sum4TokensOp").
 		Input("In2", "in2").Input("Out2", "out2").
 		Input("In3", "in3").Input("Out3", "out3").
-		Input("In4", "in4").Input("Out4", "out4").
 		Input("In5", "in5").Input("Out5", "out5").
 		Output("TotalIn", "in_toks").Output("TotalOut", "out_toks").
 		Build()
