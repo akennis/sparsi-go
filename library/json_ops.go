@@ -38,7 +38,10 @@ func (op *JSONExtractOp) Run(ctx context.Context) error {
 		if len(snippet) > 50 {
 			snippet = snippet[:50] + "..."
 		}
-		return fmt.Errorf("JSONExtractOp: invalid JSON (starts with %q): %w", snippet, err)
+		return &ErrRepairable{
+			Prompt: "The provided text is not valid JSON. Please fix it.",
+			Cause:  fmt.Errorf("JSONExtractOp: invalid JSON (starts with %q): %w", snippet, err),
+		}
 	}
 	parts := strings.Split(*op.Path, ".")
 	cur := root
