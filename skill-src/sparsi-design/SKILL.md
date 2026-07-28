@@ -32,7 +32,7 @@ unrelated to `MCPCallOp`/`MCPScriptOp`, which make the workflow a *client* of
 some other MCP server.)
 
 Read the following references before producing any output:
-1. `references/library.md` — all 91 op descriptions grouped by category
+1. `references/library.md` — all 97 op descriptions grouped by category
 2. `references/design-rules.md` — design constraints, anti-patterns, and required patterns
 3. `references/examples/README.md` — pick the most structurally similar example
 4. Read every `.go` file in that example's directory under `references/examples/<name>/`
@@ -55,6 +55,7 @@ chosen example's directory before relying on the pattern.
 | Strict parse/validate op + AI-driven minimal-mutation retry on bad input (`WithRepair`) | `with-repair/` |
 | Retrieval-augmented Q&A — lexical (BM25) retriever, ground an AI answer, parse source citations | `rag-bm25/` |
 | Retrieval-augmented Q&A — vector-store retriever (Gemini embeddings + cosine), with EmbeddingClientFactory plumbing | `rag-gemini-embed/` |
+| Pause mid-DAG for a live human decision — approval gate / pick-one / free-text — then branch on the answer | `human-in-the-loop/` |
 
 # AI recovery wrapper (WithRepair) placement
 
@@ -387,6 +388,52 @@ Instead:
 3. Ask if the source should be a **hardcoded constant** (fixed for all runs) or a **runtime input** (different every time).
 
 Do this before or as part of presenting your initial design.
+
+# Human-in-the-loop (mid-run human input)
+
+Some workflows need a *live person* to decide or supply a value **partway
+through the run**, in response to state the DAG has already computed. Three ops
+cover this — each pauses the workflow at its vertex and resumes once the human
+answers:
+
+- `HumanInputOp` → `string` — free-form text.
+- `HumanBoolInputOp` → `bool` — a yes/no approval; feed it to a predicate / `SelectBoolOp` to gate a branch.
+- `HumanChoiceInputOp` → `int` — pick one of a fixed `options` list; emits the **zero-based index**. Map it to a value downstream with `SwitchStringOp` / `SelectStringOp` / `SliceAtOp`.
+
+**When to reach for these — and when NOT to.** A HITL vertex is the right call
+only when the input is a genuine human judgment that (a) is *not* known at call
+time and (b) has no deterministic or AI answer:
+
+- ✅ Approval gate before an irreversible/outward action (send, publish, delete, pay).
+- ✅ Disambiguation the model must not guess (which of these 3 accounts did you mean?).
+- ✅ Human review/override of an AI result mid-pipeline.
+- ❌ Values the caller already knows when they invoke the tool → those are **MCP Interface inputs** (`UserInput` fields fed via `ContextValOp`), not HITL prompts. HITL is for input solicited *in reaction to* computed state, not for the workflow's opening arguments.
+- ❌ A decision a deterministic op or an AI op could make → keep the design maximally deterministic; don't offload automatable judgment onto the human.
+
+**Runtime contract — surface it in Design Rationale.** These ops reach the
+human through a prompter the entrypoint installs (codegen's job — see the
+codegen skill): under `-mcp` the question goes to the MCP client as an
+`elicitation/create` request; in CLI mode it is asked on the terminal. So a
+design that uses HITL ops MUST note in **Design Rationale** that the program is
+meant to run either as an MCP server **under a client that supports MCP
+elicitation** (e.g. Claude Code) or as an interactive CLI — and that a
+`decline`/`cancel` from the human surfaces as an op error (wrapping
+`ErrHumanDeclined`). If a rejection is an expected outcome rather than a hard
+failure, design the branch for it.
+
+**No sequencing needed.** The prompter serializes prompts per run, so parallel
+HITL vertices never prompt the human at once — you do NOT have to chain them in
+the DAG. They just need their real data dependencies. Only add an ordering edge
+(a `Condition` + `ConditionInput` on the later vertex) when a specific question
+*order* actually matters.
+
+**Dynamic content.** Each op takes an optional `Input *string` wire — wire the
+computed content the human is judging (the draft to approve, the AI result to
+review) so it is shown beneath the static `prompt` param. Leave it unwired for a
+purely static question.
+
+See `references/examples/human-in-the-loop/` for the canonical shape (three HITL
+ops feeding a downstream decision op).
 
 # Steps
 

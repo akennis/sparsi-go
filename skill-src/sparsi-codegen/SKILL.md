@@ -352,6 +352,55 @@ defer library.ShutdownMCPPool(context.Background())
 Use the named import `sparsi "github.com/akennis/sparsi-go/library"` (or `library` alias)
 to call `ShutdownMCPPool`. Skip the defer when no stdio MCP vertex sets `pool_size`.
 
+## Human-in-the-loop ops (`HumanInputOp`, `HumanBoolInputOp`, `HumanChoiceInputOp`)
+
+These ops pause the DAG and ask a real person for input (free text / a bool /
+a zero-based choice index), then feed the answer downstream. They reach the
+human through a `library.HumanPrompter` that **the entrypoint must install on
+the run context** — the ops read it back with `HumanPrompterFrom(ctx)` and fail
+if it is absent. Only add this wiring when the design's graph actually contains
+a `Human*` vertex.
+
+**Thread a prompter parameter through `runWorkflow`** and install it with
+`library.WithHumanPrompter` before `eng.Run`:
+
+```go
+func runWorkflow(ctx context.Context, pool *ants.Pool, prompter library.HumanPrompter, in UserInput) (Result, error) {
+    // ...build graph + engine...
+    ctx = library.WithHumanPrompter(ctx, prompter)
+    // ...inject UserInput values, then eng.Run(ctx)...
+}
+```
+
+**MCP server mode** — capture `req.Session` (the generated handler otherwise
+discards it as `_`) and install an `ElicitPrompter`, so each question travels to
+the client as an `elicitation/create` request:
+
+```go
+}, func(ctx context.Context, req *mcp.CallToolRequest, in UserInput) (*mcp.CallToolResult, Result, error) {
+    res, err := runWorkflow(ctx, pool, library.ElicitPrompter(req.Session), in)
+    // ...
+})
+```
+
+**CLI mode** — install `library.StdinPrompter()` so the questions are asked on
+the terminal:
+
+```go
+res, err := runWorkflow(ctx, pool, library.StdinPrompter(), in)
+```
+
+Notes:
+- The client must declare the **elicitation** capability; otherwise the op run
+  fails with "client does not support elicitation". Not all clients support it.
+- `WithHumanPrompter` serializes prompts per run, so parallel `Human*` vertices
+  never prompt the human at once — they do **not** need to be chained in the
+  DAG. Serialization does not fix the *order* they appear in; if a specific
+  order matters, add an ordering edge (`.Condition("always").ConditionInput("<upstream wire>")`).
+- `HumanChoiceInputOp` emits a zero-based `int` index into its `options` list;
+  map it to a value downstream with `SelectString`/`SwitchString` or `SliceAt`.
+- See the `human-in-the-loop` example for the full dual-mode wiring.
+
 ## Custom MCP argument and response shapes
 The default `MCPCallOp` Out dispatch handles `string`, `float64`, `int`, `bool`, `[]string`,
 `[]float64`, `[]int`, `map[string]string`, and any struct decodable via `json.Unmarshal`
