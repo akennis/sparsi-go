@@ -41,6 +41,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/openai/openai-go"
 	"google.golang.org/genai"
 
 	"github.com/akennis/sparsi-go/library"      // registers library ops
@@ -372,6 +373,13 @@ func (f *costCenterFactory) Anthropic(_ context.Context, ref string) (*anthropic
 // asked for Gemini against this factory; fail loud.
 func (f *costCenterFactory) Gemini(_ context.Context, _ string) (*genai.Client, error) {
 	return nil, fmt.Errorf("costCenterFactory: Gemini is not configured for ticket-triager")
+}
+
+// OpenAI is required by the AIClientFactory interface but unused here — this
+// example is Claude-only. Reaching this path means a misconfigured vertex
+// asked for OpenAI against this factory; fail loud.
+func (f *costCenterFactory) OpenAI(_ context.Context, _ string) (*openai.Client, error) {
+	return nil, fmt.Errorf("costCenterFactory: OpenAI is not configured for ticket-triager")
 }
 
 func init() {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/akennis/dagor/config"
+	"github.com/openai/openai-go"
 	"google.golang.org/genai"
 )
 
@@ -22,6 +23,11 @@ func (blockingFactory) Anthropic(ctx context.Context, _ string) (*anthropic.Clie
 }
 
 func (blockingFactory) Gemini(ctx context.Context, _ string) (*genai.Client, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (blockingFactory) OpenAI(ctx context.Context, _ string) (*openai.Client, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
 }

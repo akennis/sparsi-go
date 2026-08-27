@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/openai/openai-go"
 	"google.golang.org/genai"
 )
 
@@ -19,6 +20,7 @@ type recordingFactory struct {
 	calls   []factoryCall
 	anthErr error
 	gemErr  error
+	oaiErr  error
 }
 
 type factoryCall struct {
@@ -42,6 +44,16 @@ func (f *recordingFactory) Gemini(_ context.Context, ref string) (*genai.Client,
 	f.calls = append(f.calls, factoryCall{provider: "gemini", ref: ref})
 	if f.gemErr != nil {
 		return nil, f.gemErr
+	}
+	return nil, nil
+}
+
+func (f *recordingFactory) OpenAI(_ context.Context, ref string) (*openai.Client, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, factoryCall{provider: "openai", ref: ref})
+	if f.oaiErr != nil {
+		return nil, f.oaiErr
 	}
 	return nil, nil
 }
@@ -143,6 +155,18 @@ func TestNewAICaller_GeminiRoutesToFactory(t *testing.T) {
 	calls := def.snapshot()
 	if len(calls) != 1 || calls[0].provider != "gemini" || calls[0].ref != "tenants/42" {
 		t.Fatalf("default factory calls = %+v, want one gemini call with ref=tenants/42", calls)
+	}
+}
+
+func TestNewAICaller_OpenAIRoutesToFactory(t *testing.T) {
+	def := &recordingFactory{}
+	withFactories(t, def)
+	if _, err := newAICaller("openai", "gpt-4o", "tenants/7", "", retryConfig{}); err != nil {
+		t.Fatalf("newAICaller: %v", err)
+	}
+	calls := def.snapshot()
+	if len(calls) != 1 || calls[0].provider != "openai" || calls[0].ref != "tenants/7" {
+		t.Fatalf("default factory calls = %+v, want one openai call with ref=tenants/7", calls)
 	}
 }
 

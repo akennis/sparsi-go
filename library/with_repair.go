@@ -33,7 +33,7 @@ const WithRepairDescription = `WithRepair: AI-driven recovery wrapper around a d
              input/output field names verbatim — wire it in buildGraph
              identically to the unwrapped inner op.
   Params:    max_attempts string — repair cycle budget (default "3").
-             provider     string — AI provider: "claude" (default) or "gemini".
+             provider     string — AI provider: "claude" (default), "gemini", or "openai" (also serves OpenAI-compatible servers like Ollama).
              model        string — model passed to the provider (default "claude-sonnet-4-6").
              max_tokens   string — LLM response token budget (default "2048").
              credential_ref string — opaque credential identifier passed to AIClientFactory (default ""; ignored by the bundled env-var factory).

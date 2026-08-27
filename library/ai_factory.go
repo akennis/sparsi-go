@@ -9,6 +9,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/openai/openai-go"
+	openaioption "github.com/openai/openai-go/option"
 	"google.golang.org/genai"
 )
 
@@ -22,12 +24,22 @@ import (
 type AIClientFactory interface {
 	Anthropic(ctx context.Context, ref string) (*anthropic.Client, error)
 	Gemini(ctx context.Context, ref string) (*genai.Client, error)
+	// OpenAI returns a client for the OpenAI Chat Completions API. The same
+	// method serves OpenAI itself and any OpenAI-compatible server (e.g. a
+	// local Ollama instance) — implementations choose the base URL.
+	OpenAI(ctx context.Context, ref string) (*openai.Client, error)
 }
 
-// EnvAIClientFactory is the bundled factory. It reads CLAUDE_API_KEY and
-// GEMINI_API_KEY from the process environment and caches the constructed
-// client per ref. Env-var credentials don't rotate, so a single entry under
-// the empty ref is the steady state for almost all callers.
+// EnvAIClientFactory is the bundled factory. It reads CLAUDE_API_KEY,
+// GEMINI_API_KEY, and OPENAI_API_KEY from the process environment and caches
+// the constructed client per ref. Env-var credentials don't rotate, so a
+// single entry under the empty ref is the steady state for almost all callers.
+//
+// To target a local Ollama server (or any OpenAI-compatible endpoint) through
+// the "openai" provider, set OPENAI_BASE_URL (e.g.
+// http://localhost:11434/v1). When OPENAI_BASE_URL is set and OPENAI_API_KEY
+// is empty, a placeholder key is used so servers that don't check auth (like
+// Ollama) work out of the box.
 //
 // SECURITY: the per-ref cache has no eviction. Do NOT derive ref from
 // per-request input (tenant id, user id, request header value, query
@@ -41,6 +53,7 @@ type EnvAIClientFactory struct {
 	mu        sync.Mutex
 	anthropic map[string]*anthropic.Client
 	gemini    map[string]*genai.Client
+	openai    map[string]*openai.Client
 }
 
 // Anthropic returns an *anthropic.Client built from CLAUDE_API_KEY. ref is
@@ -88,6 +101,42 @@ func (f *EnvAIClientFactory) Gemini(ctx context.Context, ref string) (*genai.Cli
 	}
 	f.gemini[ref] = c
 	return c, nil
+}
+
+// OpenAI returns an *openai.Client built from OPENAI_API_KEY, optionally
+// pointed at OPENAI_BASE_URL (set it to a local Ollama endpoint such as
+// http://localhost:11434/v1 to route the "openai" provider there). ref is
+// ignored — the env-var path has nothing to route on.
+func (f *EnvAIClientFactory) OpenAI(ctx context.Context, ref string) (*openai.Client, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c, ok := f.openai[ref]; ok {
+		return c, nil
+	}
+	// Warn at most once per ref that the bundled factory ignores ref and uses
+	// OPENAI_API_KEY only. Same dedupe pattern as Anthropic above.
+	if ref != "" {
+		slog.WarnContext(ctx, fmt.Sprintf("EnvAIClientFactory: ref=%q is ignored — bundled factory uses OPENAI_API_KEY env var only. Register a custom factory via RegisterAIClientFactory for per-ref credential routing.", ref), "ref", ref, "provider", "openai")
+	}
+	key := os.Getenv("OPENAI_API_KEY")
+	base := os.Getenv("OPENAI_BASE_URL")
+	opts := []openaioption.RequestOption{}
+	if base != "" {
+		opts = append(opts, openaioption.WithBaseURL(base))
+		// Local OpenAI-compatible servers (e.g. Ollama) don't check auth but
+		// the SDK still sends an Authorization header; supply a placeholder so
+		// callers needn't invent a key.
+		if key == "" {
+			key = "ollama"
+		}
+	}
+	opts = append(opts, openaioption.WithAPIKey(key))
+	c := openai.NewClient(opts...)
+	if f.openai == nil {
+		f.openai = map[string]*openai.Client{}
+	}
+	f.openai[ref] = &c
+	return &c, nil
 }
 
 var (
