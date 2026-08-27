@@ -22,6 +22,7 @@ Read the example whose structural pattern most closely matches the workflow you 
 | AI-driven repair around deterministic ops (parse/validate op returns *ErrRepairable; WithRepair wrapper sends the prompt to the LLM, parses the response back via UnmarshalRepair, and re-runs the inner op) | `with-repair/` |
 | Retrieval-augmented generation over a local knowledge base with lexical BM25 retriever + source-file citations (load docs → RetrieveOp k=3 → BuildRAGPromptOp + AIComputeStringToStringOp → ParseCitationsOp) | `rag-bm25/` |
 | Retrieval-augmented generation with a vector-store-backed Retriever using Gemini embeddings + cosine similarity, demonstrating EmbeddingClientFactory credential plumbing (per-vertex credential_ref / client_factory_id routing on RetrieveOp) | `rag-gemini-embed/` |
+| Human-in-the-loop approval mid-run (pause the DAG to ask a person: HumanBoolInputOp approve? + HumanChoiceInputOp pick-one → index + HumanInputOp free text → downstream decision op; dual-mode: MCP elicitation under `-mcp`, terminal stdin in CLI) | `human-in-the-loop/` |
 
 ## Quick-reference guidance
 
@@ -62,3 +63,15 @@ Read the example whose structural pattern most closely matches the workflow you 
   and `url: "https://..."` on the vertex. Optional `headers: "Authorization=Bearer ${TOKEN}"` for
   authenticated remote servers. Pooling is stdio-only in v1 — do not set `pool_size > 0` for
   http transport.
+
+- **Pausing the DAG to ask a real person**: use `human-in-the-loop`.
+  `HumanBoolInputOp` (→ bool), `HumanChoiceInputOp` (→ zero-based index), and `HumanInputOp`
+  (→ string) each block their vertex until the human answers, then feed a downstream decision op.
+  The entrypoint installs the prompter: `library.ElicitPrompter(req.Session)` in the `-mcp`
+  handler (question travels to the client as an `elicitation/create` request; the client must
+  support elicitation), `library.StdinPrompter()` in CLI mode. `WithHumanPrompter` serializes
+  prompts per run, so parallel HITL vertices need no explicit ordering; add a
+  `Condition`/`ConditionInput` edge only when the question order matters. A `decline`/`cancel`
+  surfaces as an error wrapping `library.ErrHumanDeclined`. Use this for approval gates,
+  disambiguation, or human review of an AI result — not for values already known at call time
+  (those are `UserInput` fields) or decisions a deterministic/AI op could make.

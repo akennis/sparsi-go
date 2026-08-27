@@ -53,4 +53,7 @@
 //go:generate daggen -type=RetrieveOp -output=retrieve_op_gen.go
 //go:generate daggen -type=RetrieveWithFiltersOp -output=retrieve_with_filters_op_gen.go
 //go:generate daggen -type=ValidateCitationsOp -output=validate_citations_op_gen.go
+//go:generate daggen -type=HumanInputOp -output=human_input_gen.go
+//go:generate daggen -type=HumanBoolInputOp -output=human_bool_input_gen.go
+//go:generate daggen -type=HumanChoiceInputOp -output=human_choice_input_gen.go
 package library

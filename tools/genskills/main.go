@@ -38,6 +38,7 @@ var exampleDirs = []string{
 	"with-repair",
 	"rag-bm25",
 	"rag-gemini-embed",
+	"human-in-the-loop",
 }
 
 func main() {

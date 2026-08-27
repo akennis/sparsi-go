@@ -140,6 +140,11 @@ func AllDescriptions() string {
 			MCPCallOpDescription,
 			MCPScriptOpDescription,
 		}},
+		{"## Human-in-the-loop", []string{
+			HumanInputOpDescription,
+			HumanBoolInputOpDescription,
+			HumanChoiceInputOpDescription,
+		}},
 	}
 
 	var sb strings.Builder
